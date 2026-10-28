@@ -5,6 +5,8 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { SessionSidebar, type SelectSessionOptions, type SessionSidebarControl } from "./SessionSidebar";
 import { ChatWindow } from "./ChatWindow";
+import { ChatViewTabs, type ChatView } from "./ChatViewTabs";
+import { LazyTrajectoryView, loadTrajectoryView } from "./trajectory/LazyTrajectoryView";
 import { NewSessionContextBar, type NewSessionContextControl } from "./NewSessionContextBar";
 import type { ChatScrollPosition } from "@/lib/chat-scroll-position";
 import { FileViewer } from "./FileViewer";
@@ -26,6 +28,7 @@ import { useIsMobile, useIsNarrowMobile } from "@/hooks/useIsMobile";
 import { useViewportHeight } from "@/hooks/useViewportHeight";
 import { useResizablePanel } from "@/hooks/useResizablePanel";
 import { useAudio } from "@/hooks/useAudio";
+import { prefetchTrajectory } from "@/hooks/useTrajectoryTranscript";
 import { copyText } from "@/lib/clipboard";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { getFileName } from "@/lib/file-paths";
@@ -149,6 +152,27 @@ export function AppShell() {
   // stale (e.g. a delete that completes after the user navigated away).
   const selectedSessionRef = useRef(selectedSession);
   selectedSessionRef.current = selectedSession;
+  // 聊天区正在显示哪个会话的轨迹（顶栏「对话 | 轨迹」）；null 就是在看对话。
+  // 存会话 id 而不是布尔值：换了会话它自然不再成立，不会把上一个会话的轨迹带到另一个上。
+  const [trajectorySessionId, setTrajectorySessionId] = useState<string | null>(null);
+  const openTrajectorySessionId = trajectorySessionId !== null && trajectorySessionId === selectedSession?.id
+    ? trajectorySessionId
+    : null;
+  // 换了会话（或开了新会话）就回到对话，免得切回来时还停在它的轨迹上。
+  useEffect(() => {
+    setTrajectorySessionId(null);
+  }, [selectedSession?.id]);
+  const handleChatViewChange = useCallback((view: ChatView) => {
+    setTrajectorySessionId(view === "trajectory" ? selectedSessionRef.current?.id ?? null : null);
+  }, []);
+  // 指针移上 / 聚焦 / 触到「轨迹」标签：多半马上要点它，先把视图的代码和这个会话的第一页数据取好，
+  // 点下去时没有东西可等。两样都是尽力而为、重复调用无妨（代码只取一次，预取有去重）。
+  const warmTrajectory = useCallback(() => {
+    const sessionId = selectedSessionRef.current?.id;
+    if (!sessionId) return;
+    loadTrajectoryView().catch(() => {});
+    prefetchTrajectory(sessionId);
+  }, []);
   const [sessionCatalog, setSessionCatalog] = useState<SessionInfo[]>([]);
   const handleSessionsChange = useCallback((sessions: SessionInfo[]) => {
     setSessionCatalog(sessions);
@@ -844,6 +868,8 @@ export function AppShell() {
 
   const handleSelectSession = useCallback((session: SessionInfo, isRestore = false, entryId?: string, blockIndex?: number, options?: SelectSessionOptions) => {
     setSearchTarget(entryId ? { sessionId: session.id, entryId, blockIndex } : null);
+    // 搜索命中要跳到对话里的那条消息；轨迹盖着列表时跳了也看不见，先回到对话。
+    if (entryId) setTrajectorySessionId(null);
     invalidateWorkspaceRestore();
     const activeDraftKey = activeNewSessionDraftKeyRef.current;
     const activeDraftCwd = newSessionCwd ?? (selectedSession === null ? activeCwd : null);
@@ -1276,15 +1302,6 @@ export function AppShell() {
     });
   }, [fileTabs, terminalTabs, agentTabs]);
 
-  const handleViewFullHistory = useCallback(() => {
-    if (!selectedSession) return;
-    window.open(
-      `/api/sessions/${encodeURIComponent(selectedSession.id)}/export?inline=1`,
-      "_blank",
-      "noopener,noreferrer",
-    );
-  }, [selectedSession]);
-
   // Show chat area if a session is selected, or if we have a cwd to start a new session in
   const effectiveNewSessionCwd = newSessionCwd ?? (selectedSession === null && activeCwd ? activeCwd : null);
   const newSessionDraftKey = selectedSession === null && effectiveNewSessionCwd
@@ -1559,67 +1576,13 @@ export function AppShell() {
     if (!mobile && !showChat) return null;
     return (
       <div style={{ display: "flex", alignItems: "stretch", height: "100%" }}>
-        <button
-          type="button"
-          onClick={() => {
-            handleViewFullHistory();
-            if (mobile && isNarrowMobile) setMobileToolbarMoreOpen(true);
-          }}
-          disabled={!selectedSession}
-          title={selectedSession ? translate("history.full") : translate("history.unsaved")}
-          aria-label={translate("history.full")}
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 6,
-            width: mobile ? TOP_BAR_ICON_BUTTON_SIZE : undefined,
-            height: "100%",
-            padding: mobile ? 0 : "0 12px",
-            background: "none",
-            border: "none",
-            borderTop: "2px solid transparent",
-            borderRight: "1px solid var(--border)",
-            color: selectedSession ? "var(--text-muted)" : "var(--text-dim)",
-            cursor: selectedSession ? "pointer" : "not-allowed",
-            opacity: selectedSession ? 1 : 0.45,
-            flexShrink: 0,
-            fontSize: 11,
-            whiteSpace: "nowrap",
-            transition: "color 0.1s, background 0.1s, opacity 0.1s",
-          }}
-          onMouseEnter={(event) => {
-            if (!selectedSession) return;
-            event.currentTarget.style.color = "var(--text)";
-            event.currentTarget.style.background = "var(--bg-hover)";
-          }}
-          onMouseLeave={(event) => {
-            event.currentTarget.style.color = selectedSession ? "var(--text-muted)" : "var(--text-dim)";
-            event.currentTarget.style.background = "none";
-          }}
-          data-mobile-toolbar-action={mobile ? "history" : undefined}
-        >
-          <svg
-            width="12"
-            height="12"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            style={{
-              color: selectedSession ? "var(--text-muted)" : "var(--text-dim)",
-              flexShrink: 0,
-            }}
-            aria-hidden="true"
-          >
-            <path d="M3 12a9 9 0 1 0 3-6.7L3 8" />
-            <path d="M3 3v5h5" />
-            <path d="M12 7v5l3 2" />
-          </svg>
-          {!mobile && <span>{translate("history.label")}</span>}
-        </button>
+        <ChatViewTabs
+          view={openTrajectorySessionId !== null ? "trajectory" : "chat"}
+          onChange={handleChatViewChange}
+          trajectoryDisabled={!selectedSession}
+          onTrajectoryIntent={warmTrajectory}
+          iconWidth={mobile ? TOP_BAR_ICON_BUTTON_SIZE : undefined}
+        />
         {(() => {
           // 上下文压缩后当前消息可能不再包含 user 消息，需同时参考会话文件的消息总数。
           const hasMessages = Boolean(
@@ -2577,6 +2540,13 @@ export function AppShell() {
               newSessionCwd={effectiveNewSessionCwd}
               newSessionDraftKey={newSessionDraftKey}
               newSessionContextBar={newSessionContextBar}
+              trajectoryView={openTrajectorySessionId !== null ? (
+                <LazyTrajectoryView
+                  key={openTrajectorySessionId}
+                  sessionId={openTrajectorySessionId}
+                  running={runningSessionIds.has(openTrajectorySessionId)}
+                />
+              ) : null}
               initialNewSessionChoices={selectedSession === null ? carriedNewSessionChoices : null}
               onNewSessionChoicesChange={handleNewSessionChoicesChange}
               onAgentEnd={handleAgentEnd}

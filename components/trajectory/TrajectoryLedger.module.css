@@ -1,0 +1,371 @@
+/*
+ * 轨迹记录列表。版式参照 deepseek-ai/deepseek-harness 的 TrajectoryTable /
+ * TrajectoryTurnHeader / TrajectoryGroupHeader 样式（MIT，Copyright (c) 2026 DeepSeek），
+ * 用 pi-web 的主题令牌重写，不新增颜色；出错沿用 MessageView 已有的 #ef4444。
+ */
+
+.ledger {
+  /* 每行的列：序号 · 类型标签 · 摘要 · 输入 · 输出 · 缓存 · 耗时 */
+  --tj-cols: 34px 62px minmax(0, 1fr) 52px 52px 52px 64px;
+  --tj-rail: color-mix(in srgb, var(--accent) 24%, var(--bg));
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 12px;
+  outline: none;
+  container-type: inline-size;
+  overscroll-behavior: contain;
+}
+
+.ledger:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.historyRow {
+  display: flex;
+  justify-content: center;
+  padding: 8px;
+}
+
+.empty {
+  margin: 0;
+  padding: 24px 16px;
+  color: var(--text-dim);
+  text-align: center;
+}
+
+.historyButton {
+  padding: 3px 12px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text-muted);
+  background: var(--bg-panel);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+
+.historyButton:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+@media (hover: hover) {
+  .historyButton:hover:not(:disabled) {
+    color: var(--text);
+    background: var(--bg-hover);
+  }
+}
+
+/* 每一轮的粘性表头：直接是滚动容器的子元素，整轮的行经过时一直吸在顶部，下一轮的表头会盖住它。 */
+.turnHeader {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  box-sizing: border-box;
+  height: 26px;
+  padding: 0 8px 0 10px;
+  gap: 6px;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+
+.turnHeader:first-child {
+  border-top-color: transparent;
+}
+
+.turnTitle {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  color: var(--text);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.turnTitle:disabled {
+  cursor: default;
+}
+
+.turnTitle:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.turnColumns {
+  display: grid;
+  flex: none;
+  grid-template-columns: 52px 52px 52px 64px;
+  column-gap: 6px;
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.groupHeader {
+  display: flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 8px 0 50px;
+  gap: 8px;
+  color: var(--text-dim);
+  font-size: 11px;
+  box-shadow: inset 2px 0 0 var(--tj-rail);
+}
+
+.groupTitle {
+  flex: none;
+  font-weight: 600;
+}
+
+.groupDescription {
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row {
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--tj-cols);
+  align-items: center;
+  box-sizing: border-box;
+  height: 30px;
+  padding: 0 8px 0 10px;
+  column-gap: 6px;
+  cursor: pointer;
+  box-shadow: inset 2px 0 0 var(--tj-rail);
+}
+
+@media (hover: hover) {
+  .row:hover {
+    background: var(--bg-hover);
+  }
+}
+
+.row[data-selected='true'] {
+  background: var(--bg-selected);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.row[data-dimmed='true'] {
+  opacity: 0.35;
+}
+
+.index {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.tagSlot {
+  display: flex;
+  min-width: 0;
+}
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
+  max-width: 100%;
+  height: 18px;
+  padding: 0 6px;
+  overflow: hidden;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.tag[data-kind='user'] {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.tag[data-kind='message'] {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
+.tag[data-kind='tool'] {
+  color: var(--text-muted);
+  border-color: var(--border);
+  background: var(--bg-subtle);
+}
+
+.tag[data-kind='context'] {
+  color: var(--text-dim);
+  border-color: var(--border);
+  border-style: dashed;
+}
+
+.tag[data-kind='compacted'] {
+  color: color-mix(in srgb, var(--accent) 60%, var(--text-muted));
+  border-color: currentColor;
+  border-style: dashed;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.row[data-error='true'] .tag {
+  color: #ef4444;
+  border-color: color-mix(in srgb, #ef4444 40%, transparent);
+  background: color-mix(in srgb, #ef4444 12%, transparent);
+}
+
+.text {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.callsToggle {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin-right: 2px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  color: var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 16px;
+}
+
+@media (hover: hover) {
+  .callsToggle:hover {
+    color: var(--text);
+    background: var(--bg-hover);
+  }
+}
+
+/* 触屏：16px 的折叠按钮手指点不中；提到 28px（行高 30px 放得下，行不会变高）。 */
+@media (pointer: coarse) {
+  .callsToggle {
+    width: 28px;
+    height: 28px;
+    line-height: 28px;
+  }
+}
+
+.placeholder {
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+.metric,
+.time {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.row[data-error='true'] .time {
+  color: #ef4444;
+}
+
+.pending {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pending-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes pending-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pending {
+    animation: none;
+  }
+}
+
+.summaryRow {
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+  width: 100%;
+  height: 22px;
+  padding: 0 8px 0 50px;
+  gap: 6px;
+  border: 0;
+  color: var(--text-dim);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  box-shadow: inset 2px 0 0 var(--tj-rail);
+}
+
+@media (hover: hover) {
+  .summaryRow:hover {
+    color: var(--text);
+    background: var(--bg-hover);
+  }
+}
+
+.summaryRow:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.summaryChevron {
+  flex: none;
+  font-size: 10px;
+}
+
+.summaryText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 列表变窄（检查器占掉一半）时先收掉缓存、输出、输入三列，只留耗时。 */
+@container (max-width: 560px) {
+  .ledger,
+  .row {
+    --tj-cols: 34px 62px minmax(0, 1fr) 64px;
+  }
+
+  .row .metric {
+    display: none;
+  }
+
+  .turnColumns {
+    grid-template-columns: 64px;
+  }
+
+  .turnColumns span:nth-child(-n + 3) {
+    display: none;
+  }
+}

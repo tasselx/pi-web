@@ -1,0 +1,61 @@
+/*
+ * 顶栏里的「对话 | 轨迹」。外观沿用顶栏其余按钮：36px 高、右侧分隔线、11px 字；
+ * 选中项和展开着面板的顶栏按钮一样，顶部 2px 强调线加 --bg-selected。
+ */
+
+.tabs {
+  display: flex;
+  align-items: stretch;
+  height: 100%;
+}
+
+.tab {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 100%;
+  padding: 0 12px;
+  border: none;
+  border-top: 2px solid transparent;
+  border-right: 1px solid var(--border);
+  color: var(--text-muted);
+  background: none;
+  cursor: pointer;
+  font-size: 11px;
+  white-space: nowrap;
+  transition: color 0.1s, background 0.1s, opacity 0.1s;
+}
+
+/* 手机顶栏：只有图标，宽度由调用方按顶栏的方格定。 */
+.tab[data-icon-only] {
+  padding: 0;
+}
+
+.tab[aria-selected='true'] {
+  border-top-color: var(--accent);
+  color: var(--text);
+  background: var(--bg-selected);
+}
+
+.tab:disabled {
+  color: var(--text-dim);
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.tab:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -3px;
+}
+
+@media (hover: hover) {
+  .tab:not(:disabled):hover {
+    color: var(--text);
+  }
+
+  .tab[aria-selected='false']:not(:disabled):hover {
+    background: var(--bg-hover);
+  }
+}

@@ -146,6 +146,7 @@ lib/
   extension-ui-queue.ts     FIFO queues for extension dialogs and custom panels, by request id; isBlockingExtensionUiRequest() (which method a run waits on)
   session-stats-format.ts   client-safe compact counts, costs and active durations of the stats toolbar and agent switcher
   turn-duration.ts          getTurnDurationMs() / formatTurnDuration(): a finished turn's length from its anchor to its last response's end, on pi's timestamps
+  trajectory/               the Trajectory view's model: derive.ts (messages → turns, steps, cells), timeline.ts, ledger.ts (flatten, filter, collapse, the list's row window), search-index.ts, record.ts
   transcript-notices.ts     client-safe: showCacheMissNotices notices on chat messages, TUI number formats, a fold's cache-miss sum
   transcript-notices-server.ts the notices derived from session entries (cache-stats port), live ones for message_end, the setting
   markdown.ts               shared markdown helpers
@@ -195,6 +196,7 @@ components/
   SidebarToast.tsx         sidebar one-line toast: archive Undo/View, failed saves
   SidebarIcons.tsx         sidebar stroke icons
   ChatWindow.tsx           chat composition + completion sound
+  ChatViewTabs.tsx         the top bar's Chat | Trajectory tab pair: which view fills the chat area
   ChatInput.tsx            input bar + model/thinking/tools/compact controls
   MessageView.tsx          one message (user/assistant/toolCall/toolResult)
   CodemodeToolView.tsx     codemode card: the tool calls its script made
@@ -222,6 +224,7 @@ components/
   DelimitedTable.tsx       a CSV/TSV file's Preview: virtualized table, gutter of file lines
   TabBar.tsx               file panel tab bar (file, terminal and subagent tabs)
   TranscriptNotices.tsx    a message's cache and cost notice lines, the fold header's cache-miss text
+  trajectory/              the Trajectory view, laid over the chat area by ChatViewTabs: LazyTrajectoryView (loads the rest on first use), TrajectoryView, Ledger, Timeline, Toolbar, Inspector; adapted from deepseek-harness's ui-trajectory (MIT)
 
 hooks/
   useAgentSession.ts       messages, streaming, SSE, fork/navigate, reconciliation; built-in slash commands (/session, bare /mcp)
@@ -239,6 +242,7 @@ hooks/
   usePrismLanguages.ts     true once the Prism languages are loaded; starts the load for a highlighter
   useTheme.ts              theme state
   useTerminalTheme.ts      the terminal's own dark/light choice (localStorage), apart from the app theme
+  useTrajectoryTranscript.ts a session's active branch for the Trajectory view (the caller says whether it runs): page-memory cache of the last 3 sessions (opens from it, revalidates behind), prefetchTrajectory() for the tab's hover, 2 s tail polls while it runs, a last fetch at the stop, older pages
 ```
 
 ---
@@ -257,6 +261,7 @@ Design decisions and traps live in `docs/agents/`, one note per area. Read every
 - [files-and-access.md](docs/agents/files-and-access.md): worktrees and project grouping, the file access allow-list (the `/api/files` security boundary), file tree visibility and its open directories per folder, uploads and chat file drops, the source view's languages by extension, the CSV/TSV table view, web password throttling. Files: `app/api/files/**`, `app/api/cwd/**`, `app/api/worktrees/**`, `app/api/file-index/**`, `app/api/web-auth/**`, `proxy.ts`, `lib/path-security.ts`, `lib/file-access.ts`, `lib/linked-directory.ts`, `lib/session-file-references*.ts`, `lib/file-tree-visibility.ts`, `lib/file-tree-expansion.ts`, `lib/file-upload-client.ts`, `lib/file-version.ts`, `lib/worktree.ts`, `lib/paths.ts`, `lib/auth-throttle.ts`, `components/ProjectWorktreePicker.tsx`, `components/NewSessionContextBar.tsx`, `components/FileExplorer.tsx`, `lib/delimited-table.ts`, `components/DelimitedTable.tsx`, the table branch of `components/FileViewer.tsx`, `hooks/useDragDrop.ts`.
 - [settings-ui.md](docs/agents/settings-ui.md): General's sidebar file-browser choice, Plugins and Skills routes, sidebar group switches, the shared `SettingsUi` blocks every settings panel and add pane uses. Files: `app/api/plugins/**`, `app/api/skills/**`, `lib/skills-service.ts`, `components/SettingsUi.tsx`, `components/settings-ui-helpers.ts`, `components/SkillsConfig.tsx`, `components/PluginsConfig.tsx`, `hooks/useFilesPlacement.ts`; also before adding a settings section or add pane.
 - [subagents.md](docs/agents/subagents.md): the built-in subagent setting, profiles and their files, run status, completion notifications, the subagent viewer tab. Files: `lib/subagent*.ts`, `app/api/subagents/**`, `components/AgentsConfig.tsx`, `components/SubagentViewer.tsx`, `components/subagent-viewer-state.ts`.
+- [trajectory.md](docs/agents/trajectory.md): the Trajectory view, a read-only trajectory of the session laid over the chat area (top bar tab pair, no route) that opens from memory and updates while a session runs: the overlay and what it keeps mounted, its z-order against extension dialogs, which session it belongs to and when it resets, Esc, container queries, why it is not `React.lazy` (a 300 ms Suspense reveal throttle), how it reads and polls a session without waking it (and why tests must not edit a file under a live wrapper), the page-memory cache, hover prefetch and why there is no Refresh button, deriving turns, steps and tool cells from pi's messages, search / collapse / timeline-range semantics, the windowed list (its pin, reveal, anchor, far jumps) and its sticky headers and follow-tail, the attribution to deepseek-harness. Files: `components/ChatViewTabs.tsx`, `components/trajectory/**`, `lib/trajectory/**`, `hooks/useTrajectoryTranscript.ts`, `trajectoryView` in `components/ChatWindow.tsx`, the trajectory state, `warmTrajectory` and tab pair in `components/AppShell.tsx`.
 - [client-platform.md](docs/agents/client-platform.md): the global shortcuts (Ctrl+Alt+N on macOS's dead-key Option+N and Windows AltGr, Esc stacking), mobile software keyboard and viewport height, the terminal's extra keys, its own dark/light theme and its font size following the chat's, completion sound. Files: `hooks/useKeyboardShortcuts.ts`, `hooks/useViewportHeight.ts`, `hooks/useAudio.ts`, `components/TerminalExtraKeys.tsx`, `lib/terminal-extra-keys.ts`, `lib/terminal-theme.ts`, `hooks/useTerminalTheme.ts`, `terminalFontSize()` in `hooks/useChatAppearance.ts`, the keyboard-open CSS.
 
 ---

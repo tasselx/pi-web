@@ -1,0 +1,139 @@
+/*
+ * 轨迹视图外框：填满聊天区盖上来的那一层（父级是 absolute inset-0），不出滚动条，
+ * 滚动只发生在记录列表和检查器里。
+ *
+ * 响应式一律用容器查询（@container），不用视口媒体查询：它嵌在聊天列里，
+ * 能用的宽度取决于侧栏、右侧面板开没开，而不是窗口宽度。
+ */
+
+.view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+  container-type: inline-size;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+}
+
+/* 状态条：左边运行状态和汇总，右边警告和刷新；高度同下面的工具栏（32px）。 */
+.header {
+  display: flex;
+  flex: none;
+  align-items: center;
+  box-sizing: border-box;
+  height: 32px;
+  padding: 0 8px;
+  gap: 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+
+.spacer {
+  flex: 1 1 auto;
+}
+
+.button:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.live {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  color: var(--accent);
+  font-size: 12px;
+}
+
+.live::before {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pulse 1.4s ease-in-out infinite;
+  content: '';
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live::before {
+    animation: none;
+  }
+}
+
+.stats {
+  display: flex;
+  flex: none;
+  gap: 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+@container (max-width: 720px) {
+  .stats {
+    display: none;
+  }
+}
+
+.warn {
+  flex: none;
+  color: #ef4444;
+  font-size: 12px;
+}
+
+.button {
+  flex: none;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text-muted);
+  background: var(--bg);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+
+@media (hover: hover) {
+  .button:hover {
+    color: var(--text);
+    background: var(--bg-hover);
+  }
+}
+
+/* 触屏：和工具栏一样提到 28px 高，手指才好点中。 */
+@media (pointer: coarse) {
+  .button {
+    min-height: 28px;
+  }
+}
+
+/* 列表和检查器并排；窄时检查器盖在列表上，所以这里是定位上下文。 */
+.split {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.state {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: 24px;
+  gap: 12px;
+  color: var(--text-muted);
+  text-align: center;
+}

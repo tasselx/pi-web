@@ -18,6 +18,7 @@ import { MessageView } from "./MessageView";
 import { MarkdownBody } from "./MarkdownBody";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
+import { TRAJECTORY_PANEL_ID, TRAJECTORY_TAB_ID } from "./ChatViewTabs";
 import { ExtensionStatusBar } from "./ExtensionStatusBar";
 import { AnsiText } from "./AnsiText";
 import { useI18n } from "@/hooks/useI18n";
@@ -56,6 +57,8 @@ interface Props {
   newSessionDraftKey: string | null;
   /** Shown above the composer while a fresh composer is still empty: where its session starts. */
   newSessionContextBar?: ReactNode;
+  /** 轨迹（顶栏「对话 | 轨迹」切到后的视图）：盖在消息列表上，输入框仍在它下面。 */
+  trajectoryView?: ReactNode;
   /** A fresh composer's model and reasoning picks, carried from the composer it replaces. */
   initialNewSessionChoices?: NewSessionChoices | null;
   onNewSessionChoicesChange?: (choices: NewSessionChoices) => void;
@@ -247,7 +250,7 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, durationMs, cacheMis
   );
 }
 
-export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, sessionRunning, newSessionCwd, newSessionDraftKey, newSessionContextBar, initialNewSessionChoices, onNewSessionChoicesChange, onAgentEnd, onToolEnd, onAttentionNeeded, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemToolsChange, onSystemInfoLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onOpenSettings, onContextUsageChange, onOpenFile, onFilesUploaded, onOpenSubagent, onAskInNewChat, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed, soundEnabled = true, onSoundToggle, playDoneSound = () => {}, unlockAudio, holdAudio }: Props) {
+export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, sessionRunning, newSessionCwd, newSessionDraftKey, newSessionContextBar, trajectoryView, initialNewSessionChoices, onNewSessionChoicesChange, onAgentEnd, onToolEnd, onAttentionNeeded, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemToolsChange, onSystemInfoLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onOpenSettings, onContextUsageChange, onOpenFile, onFilesUploaded, onOpenSubagent, onAskInNewChat, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed, soundEnabled = true, onSoundToggle, playDoneSound = () => {}, unlockAudio, holdAudio }: Props) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
   const completionNotificationsEnabled = session?.relation?.kind !== "subagent";
@@ -1082,7 +1085,9 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
         {extensionCustomUi && (
           <ExtensionCustomPanel key={extensionCustomUi.id} request={extensionCustomUi} waitingCount={waitingExtensionCustomUiCount} onInput={sendExtensionCustomInput} />
         )}
-        {!isEmptyNew && <>
+        {/* 轨迹打开时，列表和迷你图照常挂着（卸载或 display:none 会丢滚动位置、打断流式追底），
+            只用 visibility 藏起来：不可见、不可聚焦、读屏也跳过。contents 让这层包装不产生盒子，布局不变。 */}
+        {!isEmptyNew && <div className="contents" style={{ visibility: trajectoryView ? "hidden" : undefined }}>
         <div
           ref={scrollContainerRef}
           // The message list is the one place long output has to be dragged through,
@@ -1373,7 +1378,19 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
             turnsBefore={earlierTurnCount}
           />
         )}
-        </>}
+        </div>}
+        {/* 盖满消息区；z-10 低于扩展对话框（z-90）和右上角通知（z-40），所以它们仍浮在上面。 */}
+        {trajectoryView && (
+          <div
+            id={TRAJECTORY_PANEL_ID}
+            role="tabpanel"
+            aria-labelledby={TRAJECTORY_TAB_ID}
+            className="absolute inset-0 z-10"
+            style={{ background: "var(--bg)" }}
+          >
+            {trajectoryView}
+          </div>
+        )}
       </div>
 
       {quoteSelectionEnabled && quotedSelection && createPortal(
@@ -1456,7 +1473,8 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       )}
 
       <div className="relative shrink-0">
-        {!isEmptyNew && (
+        {/* 轨迹盖着列表时「回到最新」没有意义，而且它的层级（z 20）比盖层高，不藏会浮在上面。 */}
+        {!isEmptyNew && !trajectoryView && (
           <div
             style={{
               position: "absolute",

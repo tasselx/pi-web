@@ -1,0 +1,310 @@
+/*
+ * 记录检查器。版式参照 deepseek-ai/deepseek-harness 的 ui-trajectory 检查器样式
+ * （MIT，Copyright (c) 2026 DeepSeek）：42px 头部、34px 页签（选中项 2px 下划线）、
+ * 滚动正文。令牌换成 pi-web 的主题令牌，不新增颜色；出错沿用 MessageView 的 #ef4444。
+ */
+
+.root {
+  position: relative;
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  width: clamp(320px, 38%, 440px);
+  max-width: calc(100% - 280px);
+  min-width: 0;
+  min-height: 0;
+  border-left: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 12px;
+}
+
+/* 窄时（相对轨迹视图的宽度，不是窗口宽度）：检查器盖满整个分栏（父级 position: relative），点 × 回到列表。 */
+@container (max-width: 800px) {
+  .root {
+    position: absolute;
+    inset: 0;
+    z-index: 6;
+    width: auto;
+    max-width: none;
+    border-left: 0;
+  }
+}
+
+.header {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  box-sizing: border-box;
+  height: 42px;
+  padding: 0 8px 0 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.title {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 8px;
+}
+
+.titleText {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kind {
+  flex: none;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.kind[data-kind='user'] {
+  border-color: transparent;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.close {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  color: var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+}
+
+@media (hover: hover) {
+  .close:hover {
+    color: var(--text);
+    background: var(--bg-hover);
+  }
+}
+
+.close:focus-visible,
+.tab:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.tabs {
+  display: flex;
+  flex: none;
+  box-sizing: border-box;
+  height: 34px;
+  padding: 0 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  gap: 1px;
+  border-bottom: 1px solid var(--border);
+  scrollbar-width: none;
+  white-space: nowrap;
+}
+
+.tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.tab {
+  position: relative;
+  flex: none;
+  padding: 0 10px;
+  border: 0;
+  color: var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+
+@media (hover: hover) {
+  .tab:hover {
+    color: var(--text);
+    background: var(--bg-hover);
+  }
+}
+
+.tab[data-active='true'] {
+  color: var(--accent);
+}
+
+.tab[data-active='true']::after {
+  position: absolute;
+  right: 10px;
+  bottom: 0;
+  left: 10px;
+  height: 2px;
+  border-radius: 1px 1px 0 0;
+  background: var(--accent);
+  content: '';
+}
+
+.body {
+  flex: 1;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 4px 0 24px;
+  scrollbar-gutter: stable;
+}
+
+.summary,
+.preview,
+.rawPane {
+  display: flex;
+  flex-direction: column;
+}
+
+.section {
+  padding: 8px 12px 4px;
+}
+
+.heading {
+  margin: 0 0 4px;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.rows {
+  margin: 0;
+  padding: 0 12px;
+}
+
+.section .rows {
+  padding: 0;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 0;
+}
+
+.label {
+  color: var(--text-muted);
+}
+
+.value {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+
+.status::before {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  content: '';
+  vertical-align: 1px;
+}
+
+.status[data-state='done']::before {
+  background: var(--accent);
+}
+
+.status[data-state='error'] {
+  color: #ef4444;
+}
+
+.status[data-state='error']::before {
+  background: #ef4444;
+}
+
+.disclosure {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  border: 0;
+  color: var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+@media (hover: hover) {
+  .disclosure:hover {
+    color: var(--text);
+  }
+}
+
+.markdown {
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.note {
+  margin: 4px 0;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.rawBar {
+  display: flex;
+  justify-content: flex-end;
+  padding: 4px 12px;
+  gap: 6px;
+}
+
+.smallButton {
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-muted);
+  background: var(--bg-panel);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+}
+
+.smallButton[aria-pressed='true'] {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
+@media (hover: hover) {
+  .smallButton:hover {
+    color: var(--text);
+  }
+}
+
+.raw {
+  margin: 0;
+  padding: 4px 12px;
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre;
+}
+
+.raw[data-wrap='true'] {
+  overflow-x: hidden;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}

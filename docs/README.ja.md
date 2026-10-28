@@ -45,7 +45,7 @@ pi-web stop [--port N]  # 実行中のサーバーを停止
 pi-web open [--port N]  # 実行中のサーバーをブラウザーで開く
 ```
 
-更新時は `pi-web stop`、`git pull`、`npm install`、`npm run build` を順に実行してから、`pi-web` を再び起動します。`pi-web update` はグローバル npm インストール用で、ソースのチェックアウトには使えません。アンインストールするには `npm unlink -g @agegr/pi-web` を実行し、ディレクトリを削除します。
+更新時は `pi-web stop`、`git pull`、`npm install`、`npm run build` を順に実行してから、`pi-web` を再び起動します。`pi-web update` はグローバル npm インストール用で、ソースのチェックアウトには使えません。アンインストールするには `npm unlink -g @tasselx/pi-web` を実行し、ディレクトリを削除します。
 
 ## 設定
 

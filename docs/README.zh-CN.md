@@ -47,7 +47,7 @@ pi-web stop [--port N]  # 停止正在运行的服务
 pi-web open [--port N]  # 在浏览器中打开正在运行的服务
 ```
 
-更新时依次运行 `pi-web stop`、`git pull`、`npm install` 和 `npm run build`，再重新启动 `pi-web`。`pi-web update` 只适用于全局 npm 安装，不适用于源码目录。卸载时运行 `npm unlink -g @agegr/pi-web` 并删除该目录。
+更新时依次运行 `pi-web stop`、`git pull`、`npm install` 和 `npm run build`，再重新启动 `pi-web`。`pi-web update` 只适用于全局 npm 安装，不适用于源码目录。卸载时运行 `npm unlink -g @tasselx/pi-web` 并删除该目录。
 
 ## 配置
 

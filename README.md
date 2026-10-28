@@ -45,7 +45,7 @@ pi-web stop [--port N]  # stop a running server
 pi-web open [--port N]  # open a running server in the browser
 ```
 
-To update, run `pi-web stop`, `git pull`, `npm install` and `npm run build`, then start `pi-web` again. `pi-web update` is for global npm installs and does not apply to a source checkout. To uninstall, run `npm unlink -g @agegr/pi-web` and delete the directory.
+To update, run `pi-web stop`, `git pull`, `npm install` and `npm run build`, then start `pi-web` again. `pi-web update` is for global npm installs and does not apply to a source checkout. To uninstall, run `npm unlink -g @tasselx/pi-web` and delete the directory.
 
 ## Configuration
 

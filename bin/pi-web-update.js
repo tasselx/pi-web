@@ -7,9 +7,11 @@ const fs = require("fs");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const path = require("path");
 
-const NPM_LATEST_URL = "https://registry.npmjs.org/@agegr%2Fpi-web/latest";
+// 本 fork 发布在自己的 npm 包名下：更新检查和安装命令必须指向它，
+// 否则 `pi-web update` 会把上游的包装下来覆盖 fork。
+const NPM_LATEST_URL = "https://registry.npmjs.org/@tasselx%2Fpi-web/latest";
 const FETCH_TIMEOUT_MS = 10_000;
-const MANUAL_COMMAND = "npm install -g @agegr/pi-web@latest";
+const MANUAL_COMMAND = "npm install -g @tasselx/pi-web@latest";
 
 // Port of lib/app-update.ts (bin cannot import TypeScript).
 function parseStableVersion(version) {
@@ -64,14 +66,14 @@ function realpathOrSelf(target, realpath = fs.realpathSync) {
   }
 }
 
-// "global": pkgDir is <npm root -g>/@agegr/pi-web; "npx": an npx cache; else "other".
+// "global": pkgDir is <npm root -g>/@tasselx/pi-web; "npx": an npx cache; else "other".
 function getInstallKind({ pkgDir, npmRoot, realpath = fs.realpathSync }) {
   const realPkgDir = realpathOrSelf(pkgDir, realpath);
   if (realPkgDir.split(/[\\/]/).includes("_npx")) return "npx";
   if (!npmRoot) return "other";
   const inGlobalRoot =
     path.basename(realPkgDir) === "pi-web" &&
-    path.basename(path.dirname(realPkgDir)) === "@agegr" &&
+    path.basename(path.dirname(realPkgDir)) === "@tasselx" &&
     realpathOrSelf(path.dirname(path.dirname(realPkgDir)), realpath) === realpathOrSelf(npmRoot, realpath);
   return inGlobalRoot ? "global" : "other";
 }
@@ -87,7 +89,7 @@ function getGlobalNpmRoot() {
 }
 
 function runNpmInstall(version) {
-  const invocation = findNpmInvocation(["install", "-g", `@agegr/pi-web@${version}`]);
+  const invocation = findNpmInvocation(["install", "-g", `@tasselx/pi-web@${version}`]);
   if (!invocation) return null;
   const result = spawnSync(invocation.command, invocation.args, { stdio: "inherit" });
   return result.status ?? 1;
@@ -129,7 +131,7 @@ async function runUpdate({
 
   const kind = getInstallKind({ pkgDir, npmRoot: getNpmRoot(), realpath });
   if (kind === "npx") {
-    error("This pi-web runs from the npx cache. Run `npx @agegr/pi-web@latest` instead.");
+    error("This pi-web runs from the npx cache. Run `npx @tasselx/pi-web@latest` instead.");
     return 1;
   }
   if (kind !== "global") {

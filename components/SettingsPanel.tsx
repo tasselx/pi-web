@@ -16,7 +16,7 @@ import {
 import { useEnterSendMode, setEnterSendMode } from "@/hooks/useEnterSendMode";
 import { useFilesPlacement, setFilesPlacement } from "@/hooks/useFilesPlacement";
 import { sendAgentCommand } from "@/lib/agent-client";
-import type { ProjectTrustStatus, ToolSettingsResponse } from "@/lib/api-types";
+import type { AppUpdateResponse, ProjectTrustStatus, ToolSettingsResponse } from "@/lib/api-types";
 import {
   setLastSettingsSection,
   settingsSectionRequiresProject,
@@ -89,6 +89,10 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
   const [cacheMissNoticesError, setCacheMissNoticesError] = useState<string | null>(null);
   const [pushRegistering, setPushRegistering] = useState(false);
   const [pushStatus, setPushStatus] = useState<{ kind: "ok" | "error"; message: string } | null>(null);
+  // 「更新」小节：只在用户点击后才联网检查，不随设置页打开自动发请求。
+  const [updateChecking, setUpdateChecking] = useState(false);
+  const [updateResult, setUpdateResult] = useState<AppUpdateResponse | null>(null);
+  const [updateError, setUpdateError] = useState<string | null>(null);
   const [webAuthEnabled, setWebAuthEnabled] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const [logoutError, setLogoutError] = useState("");
@@ -206,6 +210,25 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
       setPushStatus({ kind: "error", message: `${t("settings.pushRegisterFailed")} ${cause instanceof Error ? cause.message : String(cause)}` });
     } finally {
       setPushRegistering(false);
+    }
+  };
+
+  // ?refresh=1 绕过服务端 12h 缓存，并让失败如实返回而不是回退旧缓存
+  // （见 app/api/app-update/route.ts），所以这里显示的就是此刻 npm 上的真实状态。
+  const checkForUpdates = async () => {
+    if (updateChecking) return;
+    setUpdateChecking(true);
+    setUpdateResult(null);
+    setUpdateError(null);
+    try {
+      const response = await fetch("/api/app-update?refresh=1");
+      const data = await response.json() as AppUpdateResponse & { error?: string };
+      if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
+      setUpdateResult(data);
+    } catch (cause) {
+      setUpdateError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setUpdateChecking(false);
     }
   };
 
@@ -485,6 +508,43 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
             );
           })}
         </div>
+      </section>
+
+      {/* 版本更新检查：沿用「后台推送」小节的按钮 + 状态行写法，不新增 CSS。 */}
+      <section className="settings-general-section">
+        <h3 className="settings-general-heading">{t("settings.updates")}</h3>
+        <p className="settings-general-description">{t("settings.updatesDescription")}</p>
+        <div className="settings-shell-option">
+          <span>{t("settings.updatesCurrent", { version: process.env.NEXT_PUBLIC_APP_VERSION ?? "0.0.0" })}</span>
+          <button
+            type="button"
+            className="config-button config-button-small config-button-secondary"
+            // 被环境变量关闭时服务端只回占位结果，再点也无意义。
+            disabled={updateChecking || updateResult?.disabled === true}
+            onClick={() => void checkForUpdates()}
+          >
+            {updateChecking ? t("settings.updatesChecking") : t("settings.updatesCheck")}
+          </button>
+        </div>
+        {updateResult && (
+          <p
+            role="status"
+            className="settings-general-error"
+            style={{ color: updateResult.disabled ? "var(--text-dim)" : "var(--accent)" }}
+          >
+            {updateResult.disabled ? (
+              t("settings.updatesDisabled")
+            ) : updateResult.updateAvailable ? (
+              // 整句都是链接：加下划线，免得和「已是最新」那行纯文字长得一样、看不出能点。
+              <a href={updateResult.releaseUrl} target="_blank" rel="noopener noreferrer" style={{ color: "inherit", textDecoration: "underline" }}>
+                {t("appUpdate.releaseNotes", { version: updateResult.latestVersion })}
+              </a>
+            ) : (
+              t("settings.updatesUpToDate", { version: updateResult.currentVersion })
+            )}
+          </p>
+        )}
+        {updateError && <p role="alert" className="settings-general-error">{t("settings.updatesFailed")} {updateError}</p>}
       </section>
 
       {webAuthEnabled && (

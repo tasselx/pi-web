@@ -816,6 +816,8 @@ export interface AppUpdateResponse {
   latestVersion: string;
   updateAvailable: boolean;
   releaseUrl: string;
+  /** PI_WEB_SKIP_VERSION_CHECK=1：服务端不联网检查；设置页据此显示「已关闭」，而不是把占位结果当成「已是最新」。 */
+  disabled?: boolean;
 }
 
 export interface PushConfigResponse {

@@ -96,7 +96,7 @@ app/api/
   provider-usage/query/route.ts    POST provider usage quotas
   push/config/route.ts             GET VAPID public key
   push/subscribe/route.ts          POST register a push subscription
-  app-update/route.ts              GET current vs latest published pi-web version
+  app-update/route.ts              GET [?refresh=1] current vs latest published pi-web version (refresh skips the 12 h cache and reports failures instead of serving stale)
 
 lib/
   agent-client.ts           typed fetch helper for /api/agent commands

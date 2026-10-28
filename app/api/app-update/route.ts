@@ -46,9 +46,12 @@ async function fetchLatestVersion(): Promise<AppUpdateResponse> {
   };
 }
 
-async function loadUpdateStatus(): Promise<AppUpdateResponse> {
+// refresh：设置页里用户主动点「检查更新」时，绕过 12h 缓存实时查询，并且失败时如实报错、
+// 不再回退旧缓存——否则刚发布的新版会被旧缓存挡住，失败也会被旧的成功结果掩盖。
+// 页眉的被动检查不带 refresh，行为不变。
+async function loadUpdateStatus(refresh: boolean): Promise<AppUpdateResponse> {
   const cache = getCache();
-  if (cache.value && cache.expiresAt > Date.now()) return cache.value;
+  if (!refresh && cache.value && cache.expiresAt > Date.now()) return cache.value;
   if (!cache.inFlight) {
     cache.inFlight = fetchLatestVersion().then((value) => {
       cache.value = value;
@@ -62,22 +65,25 @@ async function loadUpdateStatus(): Promise<AppUpdateResponse> {
   try {
     return await cache.inFlight;
   } catch (error) {
-    if (cache.value) return cache.value;
+    if (!refresh && cache.value) return cache.value;
     throw error;
   }
 }
 
-export async function GET() {
+export async function GET(req: Request) {
   if (SKIP_VERSION_CHECK) {
     return NextResponse.json({
       currentVersion: CURRENT_VERSION,
       latestVersion: CURRENT_VERSION,
       updateAvailable: false,
       releaseUrl: "",
+      // 明确告诉设置页「检查已被关闭」，避免把这份占位当成「已是最新」。
+      disabled: true,
     } satisfies AppUpdateResponse);
   }
+  const refresh = new URL(req.url).searchParams.get("refresh") === "1";
   try {
-    return NextResponse.json(await loadUpdateStatus());
+    return NextResponse.json(await loadUpdateStatus(refresh));
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : String(error) },

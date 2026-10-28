@@ -127,6 +127,7 @@ npx @tasselx/pi-web@latest
 - **智能体数据**：Pi Web 默认读取 `~/.pi/agent` 下的 pi 数据，包括 `sessions/<编码后的工作目录>/<时间戳>_<uuid>.jsonl` 中的会话文件。可通过 `PI_CODING_AGENT_DIR` 指定其他 pi agent 目录。
 - **文件系统访问**：Pi Web 必须能读取智能体数据目录及会话记录中的工作目录。与现有 pi 会话共用数据时，请让 Pi Web 运行在与 pi 相同的文件系统环境中。
 - **共享配置**：模型面板使用 pi 的模型、设置和凭据存储，因此两种界面都能看到相关更改。
+- **代码模式的 worker**：pi 同一时间最多用两个沙箱 worker 运行代码模式脚本，Pi Web 服务端的所有会话和进程内子代理共用它们；多出来的脚本最多等待 60 秒，等不到空闲 worker 才会失败。若有多个会话同时运行脚本，请在启动 Pi Web 之前把 `PI_CODEMODE_MAX_WORKERS` 设为更大的整数；每个 worker 的脚本最多可占用 256 MB。
 - **文件访问边界**：文件浏览器仅能访问在 Pi Web 中选择过的工作目录，以及它已识别的项目或会话根目录；它不是通用的文件系统浏览器。
 - **Git worktree**：切换器何时显示、如何创建 worktree，以及删除会产生什么影响，见 [Pi Web 里的 Worktree](./worktrees.zh-CN.md)。
 

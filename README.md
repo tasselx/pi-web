@@ -128,6 +128,7 @@ npx @tasselx/pi-web@latest
 - **Agent data**: Pi Web reads pi data from `~/.pi/agent` by default, including session files under `sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`. Set `PI_CODING_AGENT_DIR` to use another pi agent directory.
 - **Filesystem access**: Pi Web must be able to read the agent data directory and the working directories recorded by its sessions. Run Pi Web in the same filesystem environment as pi when sharing existing sessions.
 - **Shared configuration**: the Models panel uses pi's model, settings, and credential storage, so changes are visible to both interfaces. An open session applies a saved edit of its model when you select the model again.
+- **Code mode workers**: pi runs Code mode scripts in at most two sandbox workers at a time, shared by every session and in-process subagent of the Pi Web server. A further script waits up to 60 seconds for a free worker. If several sessions run scripts at once, set `PI_CODEMODE_MAX_WORKERS` to a larger whole number before starting Pi Web; each worker's script may use up to 256 MB.
 - **File access boundary**: the file browser is limited to working directories selected in Pi Web and project or session roots it already knows about; it is not a general filesystem browser.
 - **Git worktrees**: see [Worktrees in Pi Web](./docs/worktrees.md) for switcher visibility, worktree creation, and removal behavior.
 

@@ -189,12 +189,13 @@ export function serializeMcpConfig(document: Record<string, unknown>, originalTe
 /**
  * The document the SDK's editors read: `{}` for a missing file, else the
  * parsed text, which must be an object whose `mcpServers` is an object when
- * present. No byte-order mark is stripped, as the SDK strips none. A syntax
- * error never quotes the file (`jsonErrorMessage()`), which may hold secrets.
+ * present. A syntax error never quotes the file (`jsonErrorMessage()`), which
+ * may hold secrets.
  */
 export function parseMcpConfigDocument(text: string | undefined, path: string): Record<string, unknown> {
   let parsed: unknown;
   try {
+    // 文本来自 readResolvedConfigFile()，开头的 BOM 已按 SDK 1.4.0 的做法去掉，这里直接解析。
     parsed = text === undefined ? {} : JSON.parse(text);
   } catch (error) {
     throw new McpConfigWriteError("unparsable", path, `${path}: ${jsonErrorMessage(error, text ?? "")}`);

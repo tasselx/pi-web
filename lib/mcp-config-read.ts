@@ -123,6 +123,15 @@ export type ResolvedConfigFileRead =
   | { ok: false; reason: Extract<McpConfigFileProblem["reason"], "not-a-file" | "too-large" | "unreadable">; error: string; code?: string };
 
 /**
+ * 去掉开头的 UTF-8 BOM。pi 1.4.0 起 SDK 读写 mcp.json 前都先 `stripBom()`（#11191），
+ * 它没有公开导出，所以这里自备；列表与写入都经 `readResolvedConfigFile()` 读文件，
+ * 在这一处去掉，两边就与 SDK 一致（编辑后写回的文件也不再带 BOM，同 SDK）。
+ */
+function stripBom(text: string): string {
+  return text.startsWith("\uFEFF") ? text.slice(1) : text;
+}
+
+/**
  * Read the file at `realPath`, which has no link left in it: opened once
  * without following a link swapped in since and without blocking on a FIFO,
  * then checked through what was opened. A FIFO or a device is never read.
@@ -135,7 +144,7 @@ export function readResolvedConfigFile(realPath: string, maxBytes: number | unde
     const stats = fstatSync(fd);
     const mode = stats.mode & 0o777;
     if (!stats.isFile()) return { ok: false, reason: "not-a-file", error: "not a regular file" };
-    if (maxBytes === undefined) return { ok: true, text: readFileSync(fd, "utf8"), mode };
+    if (maxBytes === undefined) return { ok: true, text: stripBom(readFileSync(fd, "utf8")), mode };
     if (stats.size > maxBytes) return { ok: false, reason: "too-large", error: `larger than ${maxBytes} bytes` };
     // One byte past the limit: a file still growing past it is not parsed.
     const limit = maxBytes + 1;
@@ -149,7 +158,7 @@ export function readResolvedConfigFile(realPath: string, maxBytes: number | unde
       length += read;
     }
     if (length > maxBytes) return { ok: false, reason: "too-large", error: `larger than ${maxBytes} bytes` };
-    return { ok: true, text: Buffer.concat(chunks, length).toString("utf8"), mode };
+    return { ok: true, text: stripBom(Buffer.concat(chunks, length).toString("utf8")), mode };
   } catch (error) {
     const code = errorCode(error);
     return { ok: false, reason: "unreadable", error: errorMessage(error), ...(code ? { code } : {}) };
@@ -288,7 +297,7 @@ function readProjectFile(cwd: string, allowedRoots: Set<string>): { info: McpCon
 function parseConfigText(info: McpConfigFileInfo, text: string): [name: string, value: unknown][] {
   let parsed: unknown;
   try {
-    // No byte-order mark is stripped: the SDK does not strip one either.
+    // BOM 已在 readResolvedConfigFile() 去掉（SDK 1.4.0 同样先去 BOM 再解析），这里直接解析。
     parsed = JSON.parse(text);
   } catch (error) {
     problem(info, "unparsable", jsonErrorMessage(error, text));

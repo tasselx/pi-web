@@ -4,9 +4,9 @@
 
 Local browser UI for the [pi coding agent](https://github.com/earendil-works/pi). Pi Web uses the same local configuration and session files as pi, so you can browse and resume conversations, run agent turns, configure models and resources, and inspect project files from a browser.
 
-**[Try the interactive demo →](https://agegr.github.io/pi-web/)** The real Pi Web UI runs entirely in your browser, with sample sessions, files and models. There is nothing to install; replies are pre-written and no model is called.
+This repository is a fork of [agegr/pi-web](https://github.com/agegr/pi-web) (MIT). It follows upstream; its version numbers are its own and start at 1.0.0.
 
-![Pi Web displaying a pi session with structured Markdown, tool calls, and project navigation](https://raw.githubusercontent.com/agegr/pi-web/main/docs/screenshot2.png)
+![Pi Web displaying a pi session with structured Markdown, tool calls, and project navigation](./docs/screenshot2.png)
 
 ## Features
 
@@ -19,22 +19,22 @@ Local browser UI for the [pi coding agent](https://github.com/earendil-works/pi)
 
 ## Quick Start
 
-Pi Web requires Node.js 22.19.0 or newer. Check your version with `node --version`, then run:
+Pi Web requires Node.js 22.19.0 or newer. Check your version with `node --version`, then build it from source:
 
 ```bash
-npx @agegr/pi-web@latest
-```
-
-The CLI opens a browser after the server is ready. If it does not, open [http://127.0.0.1:30141](http://127.0.0.1:30141). Pi Web listens only on `127.0.0.1` by default.
-
-If no model provider is configured yet, open the **Models** panel to sign in or add an API key.
-
-To install the `pi-web` command globally:
-
-```bash
-npm install -g @agegr/pi-web@latest
+git clone https://github.com/tasselx/pi-web.git
+cd pi-web
+npm install
+npm run build
+npm link
 pi-web
 ```
+
+`npm link` links the `pi-web` command to this directory and puts it on your PATH, so keep the directory in place. The CLI opens a browser after the server is ready. If it does not, open [http://127.0.0.1:30141](http://127.0.0.1:30141). Pi Web listens only on `127.0.0.1` by default.
+
+The build writes to `.next/`, which `npm run dev` uses too. If you also develop Pi Web in this checkout, build and run it from a separate clone.
+
+If no model provider is configured yet, open the **Models** panel to sign in or add an API key.
 
 Commands:
 
@@ -43,10 +43,9 @@ pi-web version          # print the installed version
 pi-web status           # list running servers
 pi-web stop [--port N]  # stop a running server
 pi-web open [--port N]  # open a running server in the browser
-pi-web update [--check] # update a global npm install
 ```
 
-To update, run `pi-web stop`, then `pi-web update` (or run the same install command again). To uninstall, run `npm uninstall -g @agegr/pi-web`.
+To update, run `pi-web stop`, `git pull`, `npm install` and `npm run build`, then start `pi-web` again. `pi-web update` is for global npm installs and does not apply to a source checkout. To uninstall, run `npm unlink -g @agegr/pi-web` and delete the directory.
 
 ## Configuration
 
@@ -94,7 +93,7 @@ On macOS or Linux:
 HTTP_PROXY=http://127.0.0.1:7890 \
 HTTPS_PROXY=http://127.0.0.1:7890 \
 NO_PROXY=localhost,127.0.0.1 \
-npx @agegr/pi-web@latest
+pi-web
 ```
 
 On Windows PowerShell:
@@ -103,7 +102,7 @@ On Windows PowerShell:
 $env:HTTP_PROXY = "http://127.0.0.1:7890"
 $env:HTTPS_PROXY = "http://127.0.0.1:7890"
 $env:NO_PROXY = "localhost,127.0.0.1"
-npx @agegr/pi-web@latest
+pi-web
 ```
 
 ## Notes

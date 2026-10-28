@@ -4,11 +4,11 @@
 
 [pi 编程智能体](https://github.com/earendil-works/pi)的本地浏览器界面。Pi Web 与 pi 共用本机配置和会话文件，可在浏览器中查找和继续对话、运行智能体、配置模型与资源，并查看项目文件。
 
-**[在线体验演示 →](https://agegr.github.io/pi-web/)**：真实的 Pi Web 界面直接在浏览器里运行，带有示例会话、文件和模型。无需安装；回复都是预设内容，不会调用任何模型。
+本仓库是 [agegr/pi-web](https://github.com/agegr/pi-web)（MIT）的 fork，跟进上游更新；版本号独立计数，从 1.0.0 开始。
 
 中文微信群：请查看 [GitHub Discussions 帖子](https://github.com/agegr/pi-web/discussions/271)。
 
-![Pi Web 展示包含结构化 Markdown、工具调用和项目导航的 pi 会话](https://raw.githubusercontent.com/agegr/pi-web/main/docs/screenshot2.png)
+![Pi Web 展示包含结构化 Markdown、工具调用和项目导航的 pi 会话](./screenshot2.png)
 
 ## 功能
 
@@ -21,22 +21,22 @@
 
 ## 快速开始
 
-Pi Web 要求 Node.js 22.19.0 或更高版本。先用 `node --version` 检查版本，然后运行：
+Pi Web 要求 Node.js 22.19.0 或更高版本。先用 `node --version` 检查版本，然后从源码构建：
 
 ```bash
-npx @agegr/pi-web@latest
-```
-
-服务就绪后，命令行会尝试自动打开浏览器。如果没有打开，请访问 [http://127.0.0.1:30141](http://127.0.0.1:30141)。Pi Web 默认仅监听 `127.0.0.1`。
-
-如果尚未配置模型 Provider，请打开**模型（Models）**面板登录或添加 API Key。
-
-如需全局安装 `pi-web` 命令：
-
-```bash
-npm install -g @agegr/pi-web@latest
+git clone https://github.com/tasselx/pi-web.git
+cd pi-web
+npm install
+npm run build
+npm link
 pi-web
 ```
+
+`npm link` 会把 `pi-web` 命令链接到这个目录并加入 PATH，因此请保留该目录。服务就绪后，命令行会尝试自动打开浏览器。如果没有打开，请访问 [http://127.0.0.1:30141](http://127.0.0.1:30141)。Pi Web 默认仅监听 `127.0.0.1`。
+
+构建会写入 `.next/`，`npm run dev` 也使用这个目录。如果你同时在这个仓库里开发 Pi Web，请另外克隆一份来构建和运行。
+
+如果尚未配置模型 Provider，请打开**模型（Models）**面板登录或添加 API Key。
 
 命令：
 
@@ -45,10 +45,9 @@ pi-web version          # 打印已安装的版本
 pi-web status           # 列出正在运行的服务
 pi-web stop [--port N]  # 停止正在运行的服务
 pi-web open [--port N]  # 在浏览器中打开正在运行的服务
-pi-web update [--check] # 更新全局 npm 安装
 ```
 
-更新时先运行 `pi-web stop`，再运行 `pi-web update`（也可以再次执行同一条安装命令）。卸载时运行 `npm uninstall -g @agegr/pi-web`。
+更新时依次运行 `pi-web stop`、`git pull`、`npm install` 和 `npm run build`，再重新启动 `pi-web`。`pi-web update` 只适用于全局 npm 安装，不适用于源码目录。卸载时运行 `npm unlink -g @agegr/pi-web` 并删除该目录。
 
 ## 配置
 
@@ -93,7 +92,7 @@ macOS 或 Linux：
 HTTP_PROXY=http://127.0.0.1:7890 \
 HTTPS_PROXY=http://127.0.0.1:7890 \
 NO_PROXY=localhost,127.0.0.1 \
-npx @agegr/pi-web@latest
+pi-web
 ```
 
 Windows PowerShell：
@@ -102,7 +101,7 @@ Windows PowerShell：
 $env:HTTP_PROXY = "http://127.0.0.1:7890"
 $env:HTTPS_PROXY = "http://127.0.0.1:7890"
 $env:NO_PROXY = "localhost,127.0.0.1"
-npx @agegr/pi-web@latest
+pi-web
 ```
 
 ## 注意事项

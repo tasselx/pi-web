@@ -4,9 +4,9 @@
 
 [pi コーディングエージェント](https://github.com/earendil-works/pi) のローカルブラウザー UI です。Pi Web は pi と同じローカル設定とセッションファイルを使用し、ブラウザーから会話の検索と再開、エージェントの実行、モデルやリソースの設定、プロジェクトファイルの確認を行えます。
 
-**[インタラクティブデモを試す →](https://agegr.github.io/pi-web/)**：実際の Pi Web UI がブラウザー内だけで動作し、サンプルのセッション、ファイル、モデルを確認できます。インストールは不要です。返信はあらかじめ用意された内容で、モデルは呼び出しません。
+このリポジトリは [agegr/pi-web](https://github.com/agegr/pi-web)（MIT）のフォークです。アップストリームに追従しますが、バージョン番号は独自で、1.0.0 から始まります。
 
-![構造化された Markdown、ツール呼び出し、プロジェクトナビゲーションとともに pi セッションを表示する Pi Web](https://raw.githubusercontent.com/agegr/pi-web/main/docs/screenshot2.png)
+![構造化された Markdown、ツール呼び出し、プロジェクトナビゲーションとともに pi セッションを表示する Pi Web](./screenshot2.png)
 
 ## 機能
 
@@ -19,22 +19,22 @@
 
 ## クイックスタート
 
-Pi Web には Node.js 22.19.0 以降が必要です。`node --version` でバージョンを確認してから、次を実行します：
+Pi Web には Node.js 22.19.0 以降が必要です。`node --version` でバージョンを確認してから、ソースからビルドします：
 
 ```bash
-npx @agegr/pi-web@latest
-```
-
-サーバーの準備が整うと、CLI はブラウザーを自動的に開こうとします。開かない場合は [http://127.0.0.1:30141](http://127.0.0.1:30141) にアクセスしてください。Pi Web はデフォルトで `127.0.0.1` のみをリッスンします。
-
-モデル Provider が未設定の場合は、**Models** パネルを開いてログインするか API Key を追加してください。
-
-`pi-web` コマンドをグローバルにインストールする場合：
-
-```bash
-npm install -g @agegr/pi-web@latest
+git clone https://github.com/tasselx/pi-web.git
+cd pi-web
+npm install
+npm run build
+npm link
 pi-web
 ```
+
+`npm link` は `pi-web` コマンドをこのディレクトリにリンクして PATH に追加するため、ディレクトリはそのまま残してください。サーバーの準備が整うと、CLI はブラウザーを自動的に開こうとします。開かない場合は [http://127.0.0.1:30141](http://127.0.0.1:30141) にアクセスしてください。Pi Web はデフォルトで `127.0.0.1` のみをリッスンします。
+
+ビルドは `.next/` に書き込まれ、`npm run dev` も同じディレクトリを使います。このリポジトリで Pi Web の開発も行う場合は、ビルドして実行する用に別のクローンを用意してください。
+
+モデル Provider が未設定の場合は、**Models** パネルを開いてログインするか API Key を追加してください。
 
 コマンド：
 
@@ -43,10 +43,9 @@ pi-web version          # インストール済みのバージョンを表示
 pi-web status           # 実行中のサーバーを一覧表示
 pi-web stop [--port N]  # 実行中のサーバーを停止
 pi-web open [--port N]  # 実行中のサーバーをブラウザーで開く
-pi-web update [--check] # グローバル npm インストールを更新
 ```
 
-更新時は `pi-web stop` を実行してから `pi-web update` を実行します（同じインストールコマンドの再実行でも構いません）。アンインストールするには `npm uninstall -g @agegr/pi-web` を実行します。
+更新時は `pi-web stop`、`git pull`、`npm install`、`npm run build` を順に実行してから、`pi-web` を再び起動します。`pi-web update` はグローバル npm インストール用で、ソースのチェックアウトには使えません。アンインストールするには `npm unlink -g @agegr/pi-web` を実行し、ディレクトリを削除します。
 
 ## 設定
 
@@ -88,7 +87,7 @@ macOS または Linux：
 HTTP_PROXY=http://127.0.0.1:7890 \
 HTTPS_PROXY=http://127.0.0.1:7890 \
 NO_PROXY=localhost,127.0.0.1 \
-npx @agegr/pi-web@latest
+pi-web
 ```
 
 Windows PowerShell：
@@ -97,7 +96,7 @@ Windows PowerShell：
 $env:HTTP_PROXY = "http://127.0.0.1:7890"
 $env:HTTPS_PROXY = "http://127.0.0.1:7890"
 $env:NO_PROXY = "localhost,127.0.0.1"
-npx @agegr/pi-web@latest
+pi-web
 ```
 
 ## 注意事項

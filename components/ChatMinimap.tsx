@@ -1,6 +1,7 @@
 "use client";
 
 import { memo, useEffect, useRef, useState, useCallback, useMemo, type RefObject } from "react";
+import { createPortal } from "react-dom";
 import ReactMarkdown, { type Options as ReactMarkdownOptions } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import {
@@ -22,13 +23,17 @@ interface Props {
   onRevealHistory: () => void;
   /** Turns of the branch the server has not sent yet: numbers continue from it (#791). */
   turnsBefore: number;
+  /** 轨道画进的图层：ChatWindow 铺在聊天区右缘、从窗口顶到窗口底、盖在输入栏之上的一条 36px 槽。
+   *  轨道（连同悬停预览和小锁）画在槽里，所以一路延伸到底，预览也浮在输入栏上方；
+   *  消息行里原来的位置只留一块等宽的占位，列表宽度不变。槽还没挂上时不画轨道。 */
+  railSlot?: HTMLElement | null;
 }
 
 const MINIMAP_WIDTH = 36;
 const MAX_NODE_GAP = 50;
 const MINIMAP_PADDING = 12;
-// The lock button sits at the bottom of the rail (6px inset + 30px): nodes stop
-// above it so the last turn stays visible and clickable.
+// The lock button sits at the bottom of the rail (3px inset + 30px, rounded up to
+// 36px): nodes stop above it so the last turn stays visible and clickable.
 const MINIMAP_BOTTOM_PADDING = 36 + MINIMAP_PADDING;
 const PREVIEW_HIDE_DELAY = 250;
 const NAVIGATION_ACTIVE_LOCK_MS = 1600;
@@ -253,6 +258,7 @@ export const ChatMinimap = memo(function ChatMinimap({
   messageRefs,
   onRevealHistory,
   turnsBefore,
+  railSlot,
 }: Props) {
   const { t } = useI18n();
   const [visible, setVisible] = useState(false);
@@ -629,14 +635,14 @@ export const ChatMinimap = memo(function ChatMinimap({
     previewBox.scrollTop = Math.max(0, targetTop);
   }, [allNodes, minimapHovered, nearestNodeIndex]);
 
-  if (!visible) return null;
+  if (!visible || !railSlot) return null;
 
   const lastNodeTop = positionedNodes.length > 0
     ? positionedNodes[positionedNodes.length - 1].topRatio * minimapHeight
     : MINIMAP_PADDING;
   const railHeight = Math.max(1, lastNodeTop - MINIMAP_PADDING);
 
-  return (
+  const rail = (
     <div
       ref={containerRef}
       onMouseDown={handleMouseDown}
@@ -850,6 +856,16 @@ export const ChatMinimap = memo(function ChatMinimap({
         </div>
       )}
     </div>
+  );
+
+  // 轨道本体画进 ChatWindow 铺在聊天区右缘的整高图层：消息行到输入栏上沿就结束，轨道留在行里
+  // 就只能到那儿，小锁和预览都悬在输入栏上方。图层从窗口顶到窗口底、盖在输入栏之上，轨道、
+  // 预览面板、小锁都是它的子元素，自然一路到底。行里留一块等宽的占位，消息列表的宽度不变。
+  return (
+    <>
+      <div aria-hidden="true" style={{ width: MINIMAP_WIDTH, flexShrink: 0 }} />
+      {createPortal(rail, railSlot)}
+    </>
   );
 });
 

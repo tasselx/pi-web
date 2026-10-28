@@ -332,6 +332,9 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
   const [quoteError, setQuoteError] = useState<string | null>(null);
   const quotePopoverRef = useRef<HTMLDivElement | null>(null);
   const quoteChatInputRef = useRef<ChatInputHandle | null>(null);
+  // 迷你图轨道的图层（聊天区右缘的整高槽，见下面的槽元素）；放进 state，槽一挂上
+  // ChatMinimap 就能把轨道 portal 进去。
+  const [minimapSlot, setMinimapSlot] = useState<HTMLDivElement | null>(null);
   const closeQuotedSelection = useCallback(() => {
     setQuotedSelection(null);
     setQuoteInputOpen(false);
@@ -1376,6 +1379,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
             messageRefs={messageRefs}
             onRevealHistory={revealHistoryForMinimap}
             turnsBefore={earlierTurnCount}
+            railSlot={minimapSlot}
           />
         )}
         </div>}
@@ -1392,6 +1396,20 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
           </div>
         )}
       </div>
+
+      {/* 迷你图轨道的图层：贴着聊天区右缘，从窗口顶一路铺到窗口底，盖在输入栏和状态栏之上
+          （输入栏右侧本来就留着 36px 的空槽，即 ChatInput 的右内边距）。ChatMinimap 把轨道、
+          悬停预览和小锁 portal 进来，所以轨道和预览都一路到底，预览打开时浮在输入栏上方；
+          消息行里留一块等宽的占位，列表宽度不变。z-30 高于输入栏块里的「回到最新」（z-20），
+          低于输入栏的弹出层（z-60 起）和扩展对话框（z-90）。没有轨道时槽是空的、不挡鼠标；
+          轨迹盖着列表时和行里的占位一起藏起来。 */}
+      {!isMobile && (
+        <div
+          ref={setMinimapSlot}
+          className="absolute bottom-0 right-0 top-0 z-30 flex empty:pointer-events-none"
+          style={{ width: CHAT_MINIMAP_WIDTH, visibility: trajectoryView ? "hidden" : undefined }}
+        />
+      )}
 
       {quoteSelectionEnabled && quotedSelection && createPortal(
         <div

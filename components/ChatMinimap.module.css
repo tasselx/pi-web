@@ -270,10 +270,11 @@
 }
 
 /* Lock toggle at the bottom of the rail: while locked, the preview panel
-   does not pop out on hover. */
+   does not pop out on hover. 离轨道（窗口）底边 3px：30px 高的按钮中心因此在底边上方 18px，
+   正是 36px 高的状态栏带的正中，锁和状态栏的文字在同一水平线上。 */
 .lock {
   position: absolute;
-  bottom: 6px;
+  bottom: 3px;
   left: 50%;
   z-index: 3;
   display: flex;

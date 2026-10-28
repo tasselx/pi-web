@@ -21,7 +21,38 @@
 
 ## 快速开始
 
-Pi Web 要求 Node.js 22.19.0 或更高版本。先用 `node --version` 检查版本，然后从源码构建：
+Pi Web 要求 Node.js 22.19.0 或更高版本。先用 `node --version` 检查版本，然后运行：
+
+```bash
+npx @tasselx/pi-web@latest
+```
+
+服务就绪后，命令行会尝试自动打开浏览器。如果没有打开，请访问 [http://127.0.0.1:30141](http://127.0.0.1:30141)。Pi Web 默认仅监听 `127.0.0.1`。
+
+如果尚未配置模型 Provider，请打开**模型（Models）**面板登录或添加 API Key。
+
+如需全局安装 `pi-web` 命令：
+
+```bash
+npm install -g @tasselx/pi-web@latest
+pi-web
+```
+
+命令：
+
+```bash
+pi-web version          # 打印已安装的版本
+pi-web status           # 列出正在运行的服务
+pi-web stop [--port N]  # 停止正在运行的服务
+pi-web open [--port N]  # 在浏览器中打开正在运行的服务
+pi-web update [--check] # 更新全局 npm 安装
+```
+
+更新时先运行 `pi-web stop`，再运行 `pi-web update`（也可以再次执行同一条安装命令）。卸载时运行 `npm uninstall -g @tasselx/pi-web`。
+
+### 从源码构建
+
+如需运行本仓库的检出目录（例如试用尚未发布的改动），请构建并链接命令：
 
 ```bash
 git clone https://github.com/tasselx/pi-web.git
@@ -32,22 +63,9 @@ npm link
 pi-web
 ```
 
-`npm link` 会把 `pi-web` 命令链接到这个目录并加入 PATH，因此请保留该目录。服务就绪后，命令行会尝试自动打开浏览器。如果没有打开，请访问 [http://127.0.0.1:30141](http://127.0.0.1:30141)。Pi Web 默认仅监听 `127.0.0.1`。
+`npm link` 会把 `pi-web` 命令链接到这个目录并加入 PATH，因此请保留该目录。构建会写入 `.next/`，`npm run dev` 也使用这个目录。如果你同时在这个仓库里开发 Pi Web，请另外克隆一份来构建和运行。
 
-构建会写入 `.next/`，`npm run dev` 也使用这个目录。如果你同时在这个仓库里开发 Pi Web，请另外克隆一份来构建和运行。
-
-如果尚未配置模型 Provider，请打开**模型（Models）**面板登录或添加 API Key。
-
-命令：
-
-```bash
-pi-web version          # 打印已安装的版本
-pi-web status           # 列出正在运行的服务
-pi-web stop [--port N]  # 停止正在运行的服务
-pi-web open [--port N]  # 在浏览器中打开正在运行的服务
-```
-
-更新时依次运行 `pi-web stop`、`git pull`、`npm install` 和 `npm run build`，再重新启动 `pi-web`。`pi-web update` 只适用于全局 npm 安装，不适用于源码目录。卸载时运行 `npm unlink -g @tasselx/pi-web` 并删除该目录。
+更新源码目录时依次运行 `pi-web stop`、`git pull`、`npm install` 和 `npm run build`，再重新启动 `pi-web`。`pi-web update` 只适用于全局 npm 安装，不适用于源码目录。卸载时运行 `npm unlink -g @tasselx/pi-web` 并删除该目录。
 
 ## 配置
 
@@ -92,7 +110,7 @@ macOS 或 Linux：
 HTTP_PROXY=http://127.0.0.1:7890 \
 HTTPS_PROXY=http://127.0.0.1:7890 \
 NO_PROXY=localhost,127.0.0.1 \
-pi-web
+npx @tasselx/pi-web@latest
 ```
 
 Windows PowerShell：
@@ -101,7 +119,7 @@ Windows PowerShell：
 $env:HTTP_PROXY = "http://127.0.0.1:7890"
 $env:HTTPS_PROXY = "http://127.0.0.1:7890"
 $env:NO_PROXY = "localhost,127.0.0.1"
-pi-web
+npx @tasselx/pi-web@latest
 ```
 
 ## 注意事项

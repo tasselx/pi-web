@@ -19,7 +19,38 @@
 
 ## クイックスタート
 
-Pi Web には Node.js 22.19.0 以降が必要です。`node --version` でバージョンを確認してから、ソースからビルドします：
+Pi Web には Node.js 22.19.0 以降が必要です。`node --version` でバージョンを確認してから、次を実行します：
+
+```bash
+npx @tasselx/pi-web@latest
+```
+
+サーバーの準備が整うと、CLI はブラウザーを自動的に開こうとします。開かない場合は [http://127.0.0.1:30141](http://127.0.0.1:30141) にアクセスしてください。Pi Web はデフォルトで `127.0.0.1` のみをリッスンします。
+
+モデル Provider が未設定の場合は、**Models** パネルを開いてログインするか API Key を追加してください。
+
+`pi-web` コマンドをグローバルにインストールする場合：
+
+```bash
+npm install -g @tasselx/pi-web@latest
+pi-web
+```
+
+コマンド：
+
+```bash
+pi-web version          # インストール済みのバージョンを表示
+pi-web status           # 実行中のサーバーを一覧表示
+pi-web stop [--port N]  # 実行中のサーバーを停止
+pi-web open [--port N]  # 実行中のサーバーをブラウザーで開く
+pi-web update [--check] # グローバル npm インストールを更新
+```
+
+更新時は `pi-web stop` を実行してから `pi-web update` を実行します（同じインストールコマンドの再実行でも構いません）。アンインストールするには `npm uninstall -g @tasselx/pi-web` を実行します。
+
+### ソースからビルドする
+
+このリポジトリのチェックアウトを実行する場合（たとえば未リリースの変更を試すとき）は、ビルドしてコマンドをリンクします：
 
 ```bash
 git clone https://github.com/tasselx/pi-web.git
@@ -30,22 +61,9 @@ npm link
 pi-web
 ```
 
-`npm link` は `pi-web` コマンドをこのディレクトリにリンクして PATH に追加するため、ディレクトリはそのまま残してください。サーバーの準備が整うと、CLI はブラウザーを自動的に開こうとします。開かない場合は [http://127.0.0.1:30141](http://127.0.0.1:30141) にアクセスしてください。Pi Web はデフォルトで `127.0.0.1` のみをリッスンします。
+`npm link` は `pi-web` コマンドをこのディレクトリにリンクして PATH に追加するため、ディレクトリはそのまま残してください。ビルドは `.next/` に書き込まれ、`npm run dev` も同じディレクトリを使います。このリポジトリで Pi Web の開発も行う場合は、ビルドして実行する用に別のクローンを用意してください。
 
-ビルドは `.next/` に書き込まれ、`npm run dev` も同じディレクトリを使います。このリポジトリで Pi Web の開発も行う場合は、ビルドして実行する用に別のクローンを用意してください。
-
-モデル Provider が未設定の場合は、**Models** パネルを開いてログインするか API Key を追加してください。
-
-コマンド：
-
-```bash
-pi-web version          # インストール済みのバージョンを表示
-pi-web status           # 実行中のサーバーを一覧表示
-pi-web stop [--port N]  # 実行中のサーバーを停止
-pi-web open [--port N]  # 実行中のサーバーをブラウザーで開く
-```
-
-更新時は `pi-web stop`、`git pull`、`npm install`、`npm run build` を順に実行してから、`pi-web` を再び起動します。`pi-web update` はグローバル npm インストール用で、ソースのチェックアウトには使えません。アンインストールするには `npm unlink -g @tasselx/pi-web` を実行し、ディレクトリを削除します。
+ソースのチェックアウトを更新するには `pi-web stop`、`git pull`、`npm install`、`npm run build` を順に実行してから、`pi-web` を再び起動します。`pi-web update` はグローバル npm インストール用で、ソースのチェックアウトには使えません。アンインストールするには `npm unlink -g @tasselx/pi-web` を実行し、ディレクトリを削除します。
 
 ## 設定
 
@@ -87,7 +105,7 @@ macOS または Linux：
 HTTP_PROXY=http://127.0.0.1:7890 \
 HTTPS_PROXY=http://127.0.0.1:7890 \
 NO_PROXY=localhost,127.0.0.1 \
-pi-web
+npx @tasselx/pi-web@latest
 ```
 
 Windows PowerShell：
@@ -96,7 +114,7 @@ Windows PowerShell：
 $env:HTTP_PROXY = "http://127.0.0.1:7890"
 $env:HTTPS_PROXY = "http://127.0.0.1:7890"
 $env:NO_PROXY = "localhost,127.0.0.1"
-pi-web
+npx @tasselx/pi-web@latest
 ```
 
 ## 注意事項

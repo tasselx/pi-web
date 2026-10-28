@@ -6,7 +6,7 @@ Local browser UI for the [pi coding agent](https://github.com/earendil-works/pi)
 
 This repository is a fork of [agegr/pi-web](https://github.com/agegr/pi-web) (MIT). It follows upstream; its version numbers are its own and start at 1.0.0.
 
-![Pi Web displaying a pi session with structured Markdown, tool calls, and project navigation](./docs/screenshot2.png)
+![Pi Web displaying a pi session with structured Markdown, tool calls, and project navigation](https://raw.githubusercontent.com/tasselx/pi-web/main/docs/screenshot2.png)
 
 ## Features
 
@@ -19,7 +19,38 @@ This repository is a fork of [agegr/pi-web](https://github.com/agegr/pi-web) (MI
 
 ## Quick Start
 
-Pi Web requires Node.js 22.19.0 or newer. Check your version with `node --version`, then build it from source:
+Pi Web requires Node.js 22.19.0 or newer. Check your version with `node --version`, then run:
+
+```bash
+npx @tasselx/pi-web@latest
+```
+
+The CLI opens a browser after the server is ready. If it does not, open [http://127.0.0.1:30141](http://127.0.0.1:30141). Pi Web listens only on `127.0.0.1` by default.
+
+If no model provider is configured yet, open the **Models** panel to sign in or add an API key.
+
+To install the `pi-web` command globally:
+
+```bash
+npm install -g @tasselx/pi-web@latest
+pi-web
+```
+
+Commands:
+
+```bash
+pi-web version          # print the installed version
+pi-web status           # list running servers
+pi-web stop [--port N]  # stop a running server
+pi-web open [--port N]  # open a running server in the browser
+pi-web update [--check] # update a global npm install
+```
+
+To update, run `pi-web stop`, then `pi-web update` (or run the same install command again). To uninstall, run `npm uninstall -g @tasselx/pi-web`.
+
+### Build from source
+
+To run a checkout of this repository, for example to try changes that are not released yet, build it and link the command:
 
 ```bash
 git clone https://github.com/tasselx/pi-web.git
@@ -30,22 +61,9 @@ npm link
 pi-web
 ```
 
-`npm link` links the `pi-web` command to this directory and puts it on your PATH, so keep the directory in place. The CLI opens a browser after the server is ready. If it does not, open [http://127.0.0.1:30141](http://127.0.0.1:30141). Pi Web listens only on `127.0.0.1` by default.
+`npm link` links the `pi-web` command to this directory and puts it on your PATH, so keep the directory in place. The build writes to `.next/`, which `npm run dev` uses too. If you also develop Pi Web in this checkout, build and run it from a separate clone.
 
-The build writes to `.next/`, which `npm run dev` uses too. If you also develop Pi Web in this checkout, build and run it from a separate clone.
-
-If no model provider is configured yet, open the **Models** panel to sign in or add an API key.
-
-Commands:
-
-```bash
-pi-web version          # print the installed version
-pi-web status           # list running servers
-pi-web stop [--port N]  # stop a running server
-pi-web open [--port N]  # open a running server in the browser
-```
-
-To update, run `pi-web stop`, `git pull`, `npm install` and `npm run build`, then start `pi-web` again. `pi-web update` is for global npm installs and does not apply to a source checkout. To uninstall, run `npm unlink -g @tasselx/pi-web` and delete the directory.
+To update a source checkout, run `pi-web stop`, `git pull`, `npm install` and `npm run build`, then start `pi-web` again. `pi-web update` is for global npm installs and does not apply to a source checkout. To uninstall, run `npm unlink -g @tasselx/pi-web` and delete the directory.
 
 ## Configuration
 
@@ -93,7 +111,7 @@ On macOS or Linux:
 HTTP_PROXY=http://127.0.0.1:7890 \
 HTTPS_PROXY=http://127.0.0.1:7890 \
 NO_PROXY=localhost,127.0.0.1 \
-pi-web
+npx @tasselx/pi-web@latest
 ```
 
 On Windows PowerShell:
@@ -102,7 +120,7 @@ On Windows PowerShell:
 $env:HTTP_PROXY = "http://127.0.0.1:7890"
 $env:HTTPS_PROXY = "http://127.0.0.1:7890"
 $env:NO_PROXY = "localhost,127.0.0.1"
-pi-web
+npx @tasselx/pi-web@latest
 ```
 
 ## Notes

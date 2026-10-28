@@ -20,7 +20,7 @@ interface Props {
   onPick: (target: NewSessionTarget, from: NewSessionContextControl) => void;
   /** "Use default directory": today's folder, which goes to `onPick`. */
   onUseDefaultDirectory: () => void;
-  /** "Open another project…": the folder picker, which hands its folder to `onPick`. */
+  /** "Choose folder…": the folder chooser, which hands its folder to `onPick`. */
   onOpenFolder: (opener: HTMLElement | null) => void;
   onRefreshWorktrees: () => void;
   onCreateWorktree: (project: ProjectChoice, branch: string) => Promise<{ path: string } | { error: string }>;

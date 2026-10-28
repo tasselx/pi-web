@@ -81,7 +81,7 @@ interface Props {
   /** A project or checkout other than the one in use was picked, or a checkout was just created. */
   onPick: (target: NewSessionTarget, from: ProjectWorktreeControl) => void;
   onUseDefaultDirectory: () => void;
-  /** "Open another project…": the folder picker. Focus goes back to `opener` when nothing moves. */
+  /** "Choose folder…": the folder chooser. Focus goes back to `opener` when nothing moves. */
   onOpenFolder: (opener: HTMLElement | null) => void;
   onRefreshWorktrees: () => void;
   onCreateWorktree: (project: ProjectChoice, branch: string) => Promise<{ path: string } | { error: string }>;
@@ -233,7 +233,7 @@ export function ProjectWorktreePicker({
   const stacked = layout !== "inline";
   const inline = !stacked;
   // The menus on a desktop look as main's dropdowns did: whole paths,
-  // "Custom path…", the "New worktree…" form under the list, a dirty
+  // the folder entry's "+", the "New worktree…" form under the list, a dirty
   // checkout's question in its row. A phone keeps the sheet.
   const classic = !mobile;
   const { project, worktrees } = context;
@@ -390,7 +390,7 @@ export function ProjectWorktreePicker({
       {
         type: "item",
         id: "open-folder",
-        label: t(classic ? "sidebar.customPath" : "sidebar.openOtherProject"),
+        label: t("sidebar.chooseFolder"),
         icon: classic ? <PlusIcon size={13} /> : <FolderPlusIcon size={13} />,
         onSelect: () => onOpenFolder(menu?.opener ?? null),
       },

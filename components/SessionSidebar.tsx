@@ -370,6 +370,25 @@ function saveLastCustomCwd(cwd: string): void {
   }
 }
 
+/** 系统「选择文件夹」对话框（服务端在本机弹出）的结果：选了、取消了、已经开着一个，
+ *  或这里没有（远程访问、不支持的平台、出错）。 */
+type NativeFolderChoice = { path: string } | "cancelled" | "busy" | "unavailable";
+
+async function chooseFolderNatively(prompt: string): Promise<NativeFolderChoice> {
+  try {
+    const res = await fetch("/api/cwd/pick", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt }),
+    });
+    const data = await res.json().catch(() => ({})) as { path?: string; error?: string };
+    if (res.ok) return data.path ? { path: data.path } : "cancelled";
+    return data.error === "busy" ? "busy" : "unavailable";
+  } catch {
+    return "unavailable";
+  }
+}
+
 function parseUnreadSessionIds(raw: string | null): Set<string> {
   if (!raw) return new Set();
   try {
@@ -636,7 +655,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const filesFocusRef = useRef<"project-button" | "project-list" | "file-search" | null>(null);
   const [filesFocusRequest, setFilesFocusRequest] = useState(0);
   const contextMenuFocusRef = useRef<HTMLElement | null>(null);
-  // The composer's "Open another project…": where the validated folder goes,
+  // The composer's "Choose folder…": where the validated folder goes,
   // and the control focus returns to when the composer does not move.
   const folderPickRef = useRef<((target: NewSessionTarget) => void) | null>(null);
   const folderReturnFocusRef = useRef<HTMLElement | null>(null);
@@ -1166,9 +1185,10 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const currentWorktreePath = currentWorktree?.path ?? null;
 
   // `purpose`: who asked, the folder picker's opener by default ("Use default directory" names its own).
-  const commitCustomPath = useCallback(async (candidate?: string, { remember = true, purpose = customPathOpen } = {}) => {
+  // 返回是否选定成功：系统对话框选出的路径校验没过时，调用方据此改开应用内选择器去显示原因。
+  const commitCustomPath = useCallback(async (candidate?: string, { remember = true, purpose = customPathOpen } = {}): Promise<boolean> => {
     const path = (candidate ?? customPathValue).trim();
-    if (!path || customPathValidating) return;
+    if (!path || customPathValidating) return false;
 
     setCustomPathValidating(true);
     setCustomPathError(null);
@@ -1186,7 +1206,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       };
       if (!res.ok || data.error || !data.cwd || !data.projectRoot || !data.projectKey) {
         setCustomPathError(data.error ?? `HTTP ${res.status}`);
-        return;
+        return false;
       }
       if (remember) {
         saveLastCustomCwd(data.cwd);
@@ -1203,7 +1223,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         pick?.({ cwd: data.cwd, projectKey: data.projectKey, projectRoot: data.projectRoot });
         // Not moved (the folder in use): the bar's control takes focus back.
         focusAfterCommit(() => (opener?.isConnected ? opener : null));
-        return;
+        return true;
       }
       setValidatedProject({
         cwd: data.cwd,
@@ -1211,17 +1231,59 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         key: data.projectKey,
       });
       setSelectedCwd(data.cwd);
+      return true;
     } catch (e) {
       setCustomPathError(e instanceof Error ? e.message : String(e));
+      return false;
     } finally {
       setCustomPathValidating(false);
     }
   }, [customPathOpen, customPathValue, customPathValidating, focusAfterCommit]);
 
-  const handleCustomPathClick = useCallback(() => {
-    setCustomPathOpen("files");
+  // 关掉应用内选择器，把焦点还给输入栏上方的入口；系统对话框取消时走同一条路。
+  const closeFolderPicker = useCallback((purpose: false | "files" | "new-session") => {
+    // The composer's "Choose folder…" puts focus back on its
+    // control: the picker took it and leaves nothing behind.
+    const opener = purpose === "new-session" ? folderReturnFocusRef.current : null;
+    folderPickRef.current = null;
+    folderReturnFocusRef.current = null;
+    setCustomPathOpen(false);
     setCustomPathError(null);
-  }, []);
+    if (opener) focusAfterCommit(() => (opener.isConnected ? opener : null));
+  }, [focusAfterCommit]);
+
+  // 选文件夹的入口：本机先弹系统的选择器（Finder 那种，有收藏夹、搜索、新建文件夹），
+  // 远程访问、不支持的平台、出错时再回到应用内的 DirectoryPicker。
+  // 记住「这里没有系统对话框」，之后直接开应用内选择器，不必每次先碰一次 403。
+  const nativeFolderUnavailableRef = useRef(false);
+  const chooseFolder = useCallback(async (purpose: "files" | "new-session") => {
+    setCustomPathError(null);
+    if (!nativeFolderUnavailableRef.current) {
+      const choice = await chooseFolderNatively(t("directoryPicker.selectDirectory"));
+      // 已经有一个对话框开着：它会给出结果，这次点击什么也不做。
+      if (choice === "busy") return;
+      if (choice === "cancelled") {
+        closeFolderPicker(purpose);
+        return;
+      }
+      if (choice !== "unavailable") {
+        // 系统对话框只给路径：校验和选定仍走 commitCustomPath；没过就交给应用内选择器显示原因。
+        if (await commitCustomPath(choice.path, { purpose })) return;
+        setCustomPathValue(choice.path);
+        setCustomPathOpen(purpose);
+        return;
+      }
+      nativeFolderUnavailableRef.current = true;
+    }
+    setCustomPathOpen(purpose);
+  }, [closeFolderPicker, commitCustomPath, t]);
+  // The composer's bar asks through the handle, which is made once.
+  const chooseFolderRef = useRef(chooseFolder);
+  chooseFolderRef.current = chooseFolder;
+
+  const handleCustomPathClick = useCallback(() => {
+    void chooseFolder("files");
+  }, [chooseFolder]);
   const handleDefaultCwd = useCallback(async (purpose: "files" | "new-session" = "files") => {
     try {
       const res = await fetch("/api/default-cwd", { method: "POST" });
@@ -1322,8 +1384,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     openFolderForNewSession: (onPicked, returnFocusTo) => {
       folderPickRef.current = onPicked;
       folderReturnFocusRef.current = returnFocusTo;
-      setCustomPathError(null);
-      setCustomPathOpen("new-session");
+      void chooseFolderRef.current("new-session");
     },
     openDefaultDirectoryForNewSession: (onPicked) => {
       folderPickRef.current = onPicked;
@@ -2788,16 +2849,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           initialPath={customPathValue}
           busy={customPathValidating}
           error={customPathError}
-          onCancel={() => {
-            // The composer's "Open another project…" puts focus back on its
-            // control: the picker took it and leaves nothing behind.
-            const opener = customPathOpen === "new-session" ? folderReturnFocusRef.current : null;
-            folderPickRef.current = null;
-            folderReturnFocusRef.current = null;
-            setCustomPathOpen(false);
-            setCustomPathError(null);
-            if (opener) focusAfterCommit(() => (opener.isConnected ? opener : null));
-          }}
+          onCancel={() => closeFolderPicker(customPathOpen)}
           onSelect={(path) => void commitCustomPath(path)}
         />
       )}

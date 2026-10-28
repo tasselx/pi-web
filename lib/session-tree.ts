@@ -677,6 +677,29 @@ export function familiesToDelete(
   return { ids, running };
 }
 
+/**
+ * A project group's "Delete workspace, keep sessions": root ids of the
+ * families of `projectKey` that go to the archive with it, every live one
+ * that has a file (pinned ones included). Unlike familiesToArchive it does
+ * not look at age, unread markers or the selection: the whole workspace
+ * leaves. A running family stays: isFamilyArchived says a run is never
+ * archived, so it would come straight back (the row's own archive button
+ * follows the same rule).
+ */
+export function projectFamiliesToArchive(
+  input: Pick<SessionTreeInput, "sessions" | "uiState" | "runningIds">,
+  projectKey: string,
+): string[] {
+  const ids: string[] = [];
+  for (const family of listSessionFamilies(input.sessions)) {
+    if (familyProjectKey(family) !== projectKey || family.root.transient) continue;
+    if (isFamilyArchived(family, input.uiState, input.runningIds)) continue;
+    if (anyMemberIn(family, input.runningIds)) continue;
+    ids.push(family.root.id);
+  }
+  return ids;
+}
+
 /** Prefix sums of row heights: length rows.length + 1, offsets[0] = 0. */
 export function getRowOffsets(rows: readonly SidebarRow[], layout: SidebarLayout): number[] {
   const heights = SIDEBAR_ROW_HEIGHTS[layout];

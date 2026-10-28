@@ -818,7 +818,8 @@ html[data-keyboard-open] .sidebar-sheet {
 }
 
 /* A project menu's "Delete all sessions" question (a custom menu body;
-   components/SessionSidebar.tsx): what goes, then Delete and Cancel. */
+   components/SessionSidebar.tsx): what goes, then Delete and Cancel. The
+   "Delete workspace…" question has a third answer, Keep, between them. */
 .sidebar-menu-question {
   padding: 2px 4px 4px;
 }
@@ -842,8 +843,19 @@ html[data-keyboard-open] .sidebar-sheet {
   margin-top: 8px;
 }
 
+/* Three answers do not fit side by side: one button per line. `flex: 1`
+   would size them by content in a column, not by their height. */
+.sidebar-menu-question-buttons.is-stacked {
+  flex-direction: column;
+}
+
+.sidebar-menu-question-buttons.is-stacked > button {
+  flex: 0 0 auto;
+}
+
 .sidebar-menu-question-confirm,
-.sidebar-menu-question-cancel {
+.sidebar-menu-question-cancel,
+.sidebar-menu-question-keep {
   flex: 1;
   min-width: 0;
   height: 26px;
@@ -856,8 +868,14 @@ html[data-keyboard-open] .sidebar-sheet {
   cursor: pointer;
 }
 
-.sidebar-menu-question-cancel:hover {
+.sidebar-menu-question-cancel:hover,
+.sidebar-menu-question-keep:hover {
   background: var(--bg-hover);
+}
+
+/* The answer that loses nothing reads as the main one next to Cancel. */
+.sidebar-menu-question-keep {
+  color: var(--text);
 }
 
 /* Deleting cannot be undone: the red of a row's delete confirmation. */
@@ -874,7 +892,8 @@ html[data-keyboard-open] .sidebar-sheet {
 }
 
 .sidebar-menu-question-confirm:focus-visible,
-.sidebar-menu-question-cancel:focus-visible {
+.sidebar-menu-question-cancel:focus-visible,
+.sidebar-menu-question-keep:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
@@ -887,7 +906,13 @@ html[data-keyboard-open] .sidebar-sheet {
   font-size: 14px;
 }
 
-.sidebar-sheet .sidebar-menu-question-confirm {
+.sidebar-sheet .sidebar-menu-question-confirm,
+.sidebar-sheet .sidebar-menu-question-keep {
   height: 40px;
   font-size: 14px;
+}
+
+/* Fingers need room between stacked answers. */
+.sidebar-sheet .sidebar-menu-question-buttons.is-stacked {
+  gap: 8px;
 }

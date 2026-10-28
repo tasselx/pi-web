@@ -23,6 +23,7 @@ import {
   keepOutgoingGroupOpen,
   nextProjectKeysToRecord,
   PINNED_MORE_KEY,
+  projectFamiliesToArchive,
   showLessFamilies,
   showMoreFamilies,
   type SidebarProject,
@@ -288,10 +289,11 @@ type SessionRow = Extract<SidebarRow, { kind: "session" }>;
  * The one popup menu of the sidebar; kept here, above the virtualized rows.
  * `askDelete`: a menu turned into its delete question (a group's "Delete all
  * sessions", an archive header's "Delete all", the archive bar's two).
+ * `askRemove`: a group's menu turned into its "Delete workspace…" question.
  */
 type SidebarMenuState =
   | { kind: "row"; row: SessionRow; anchor: SidebarMenuAnchor; opener: HTMLElement | null }
-  | { kind: "group"; project: SidebarProject; olderCount: number; anchor: SidebarMenuAnchor; opener: HTMLElement; askDelete?: boolean }
+  | { kind: "group"; project: SidebarProject; olderCount: number; anchor: SidebarMenuAnchor; opener: HTMLElement; askDelete?: boolean; askRemove?: boolean }
   | { kind: "archive-group"; project: SidebarProject; anchor: SidebarMenuAnchor; opener: HTMLElement; askDelete?: boolean }
   | { kind: "archive"; anchor: SidebarMenuAnchor; opener: HTMLElement; askDelete?: ArchiveDeleteScope };
 
@@ -1063,6 +1065,13 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   }, []);
 
   const restoredRef = useRef(false);
+  // 「删除工作区」删掉最后一个可选项目后，侧边栏回到「没有选中项目」。下面的
+  // 首次自动选择按 getRecentProjects 挑最近的项目（归档的会话也算数），会把刚删的
+  // 又选回来，所以这个状态要记住，直到用户重新选了项目。
+  const projectClearedRef = useRef(false);
+  useEffect(() => {
+    if (selectedCwd) projectClearedRef.current = false;
+  }, [selectedCwd]);
 
   /** Resolve both display root and stable identity from server-provided data. */
   const projectFor = useCallback((cwd: string | null): ProjectSelection | null => (
@@ -1151,7 +1160,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
   // Auto-select cwd and restore session from URL on first load
   useEffect(() => {
-    if (allSessions.length === 0 || skipInitialProjectSelection) return;
+    if (allSessions.length === 0 || skipInitialProjectSelection || projectClearedRef.current) return;
 
     if (selectedCwd === null) {
       // If restoring a session, set cwd to match that session
@@ -2134,6 +2143,10 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const askProjectDelete = useCallback((projectKey: string, askDelete: boolean) => {
     setMenu((current) => (current?.kind === "group" && current.project.key === projectKey ? { ...current, askDelete } : current));
   }, []);
+  // "Delete workspace…" turns the group's menu into its own question, the same way.
+  const askProjectRemove = useCallback((projectKey: string, askRemove: boolean) => {
+    setMenu((current) => (current?.kind === "group" && current.project.key === projectKey ? { ...current, askRemove } : current));
+  }, []);
 
   const deletingRunsRef = useRef(new Set<string>());
   const deleteFamilyIds = useCallback(async (runKey: string, ids: readonly string[], focusTarget: () => HTMLElement | null) => {
@@ -2182,6 +2195,45 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     const family = familyByRootId.get(id);
     return family ? [family] : [];
   }), [familyByRootId]);
+
+  // A group's "Delete workspace…". A group is no stored entity: the tree
+  // shows it while it has live sessions, is the current project or is
+  // pinned. So deleting one makes those three untrue: its sessions go to the
+  // archive or are deleted, the project is unpinned and loses its display
+  // name, and when it is the current project the next one takes over (the
+  // shell then closes the session open in it). Only pi-web's own records and
+  // session files change; the project's folder and its files are never
+  // touched. A running session is kept either way and stays in the sidebar
+  // until the run ends.
+  const removeWorkspace = useCallback((project: SidebarProject, deleteSessions: boolean) => {
+    setMenu(null);
+    if (project.pinned) void applyUiState({ action: "pin-project", projectKey: project.key, root: project.root, pinned: false });
+    if (project.customName !== null) void applyUiState({ action: "rename-project", projectKey: project.key, name: null });
+    if (project.current) {
+      const index = model.projects.findIndex((other) => other.key === project.key);
+      const next = model.projects[index + 1] ?? model.projects[index - 1];
+      // No other group: no project is selected, and the first-load choice
+      // (getRecentProjects counts archived sessions too) must not pick this one again.
+      projectClearedRef.current = next === undefined;
+      setSelectedCwd(next?.root ?? null);
+    }
+    const { ids: deletable, running } = familiesToDelete(treeSelectionInput, project.key);
+    if (deleteSessions && deletable.length > 0) {
+      // Its own toasts say what went and what was kept; focus follows the reload.
+      void deleteFamilyIds(`project:${project.key}`, deletable, () => groupHeaderButton(project.key));
+      return;
+    }
+    const archivable = deleteSessions ? [] : familiesOf(projectFamiliesToArchive(treeSelectionInput, project.key));
+    if (archivable.length > 0) {
+      archiveFamilies(archivable);
+    } else {
+      const parts = [t("sidebar.workspaceDeletedToast", { name: shortTitle(project.name, TOAST_TITLE_MAX) })];
+      if (running > 0) parts.push(t("sidebar.keptRunningToast", { count: running }));
+      showToast(parts.join(" · "));
+    }
+    // The group is gone with its opener: focus that fell to the page moves on.
+    focusAfterCommit(() => groupHeaderButton(project.key));
+  }, [applyUiState, archiveFamilies, deleteFamilyIds, familiesOf, focusAfterCommit, groupHeaderButton, model.projects, showToast, t, treeSelectionInput]);
 
   const handleArchiveGroupMenu = useCallback((project: SidebarProject, opener: HTMLElement) => {
     setMenu({ kind: "archive-group", project, anchor: buttonAnchor(opener, "end"), opener });
@@ -2398,8 +2450,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       icon: <RestoreIcon />,
       onSelect: () => { void applyUiState({ action: "rename-project", projectKey: project.key, name: null }); },
     }));
-    // Three groups, by what they act on: the project itself, its place in the
-    // list, its sessions (Delete all last, in red).
+    // Four groups, by what they act on: the project itself, its place in the
+    // list, its sessions (Delete all last, in red), and the workspace's
+    // removal alone at the bottom, in red too.
     return [
       {
         type: "item",
@@ -2487,6 +2540,20 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           askProjectDelete(project.key, true);
         },
       },
+      { type: "separator", id: "separator-workspace" },
+      {
+        // Never disabled: an empty current or pinned project can only be
+        // removed from here. The question says what happens to its sessions.
+        type: "item",
+        id: "delete-workspace",
+        label: t("sidebar.deleteWorkspace"),
+        icon: <TrashIcon />,
+        danger: true,
+        onSelect: ({ keepOpen }) => {
+          keepOpen();
+          askProjectRemove(project.key, true);
+        },
+      },
     ];
   };
 
@@ -2529,6 +2596,38 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       onConfirm: () => deleteAllProjectSessions(project),
       onCancel: () => askProjectDelete(project.key, false),
     });
+  };
+
+  // The question of "Delete workspace…": what becomes of the sessions. Keeping
+  // them (archived) loses nothing, so it comes first; deleting them is the red
+  // one and only offered when there are sessions to delete. The buttons stack:
+  // their labels do not fit side by side. Cancel has the focus (the sheet's own
+  // on a phone), so Enter deletes nothing.
+  const projectRemoveBody = (project: SidebarProject): ReactNode => {
+    const { ids, running } = familiesToDelete(treeSelectionInput, project.key);
+    return (
+      <div className="sidebar-menu-question">
+        <div className="sidebar-menu-header" title={project.root}>{t("sidebar.deleteWorkspaceHeading", { name: project.name })}</div>
+        <p className="sidebar-menu-question-text">{t("sidebar.deleteWorkspaceMessage")}</p>
+        {ids.length > 0 && <p className="sidebar-menu-question-text">{t("sidebar.deleteWorkspaceSessions")}</p>}
+        {running > 0 && <p className="sidebar-menu-question-text">{t("sidebar.deleteProjectSessionsRunning", { count: running })}</p>}
+        <div className="sidebar-menu-question-buttons is-stacked">
+          <button type="button" className="sidebar-menu-question-keep" onClick={() => removeWorkspace(project, false)}>
+            {t(ids.length > 0 ? "sidebar.deleteWorkspaceKeep" : "sidebar.deleteWorkspaceOnly")}
+          </button>
+          {ids.length > 0 && (
+            <button type="button" className="sidebar-menu-question-confirm" onClick={() => removeWorkspace(project, true)}>
+              {t("sidebar.deleteWorkspaceAndSessions", { count: ids.length })}
+            </button>
+          )}
+          {!isMobile && (
+            <button type="button" className="sidebar-menu-question-cancel" data-sidebar-menu-autofocus="" onClick={() => askProjectRemove(project.key, false)}>
+              {t("sidebar.cancel")}
+            </button>
+          )}
+        </div>
+      </div>
+    );
   };
 
   const archiveGroupMenuItems = (project: SidebarProject): SidebarMenuItem[] => {
@@ -2643,6 +2742,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     menuLabel = t("sidebar.projectActions", { name: project.name });
     menuItems = groupMenuItems(project, menu.olderCount);
     if (menu.askDelete) menuBody = projectDeleteBody(project);
+    else if (menu.askRemove) menuBody = projectRemoveBody(project);
     menuWidth = 264;
   } else if (menu?.kind === "archive-group") {
     const project = archiveGroups.find((row) => row.project.key === menu.project.key)?.project ?? menu.project;

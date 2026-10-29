@@ -15,8 +15,7 @@ import { openFileTab, saveFileViewerState, saveParkedFileViewerState, switchFile
 import { SettingsPanel, SettingsSectionIcon } from "./SettingsPanel";
 import { ProjectTrustDialog, type ProjectTrustFailure } from "./ProjectTrustDialog";
 import { BranchNavigator, hasSessionBranches } from "./BranchNavigator";
-import { SystemPromptPanel } from "./SystemPromptPanel";
-import { ToolDefinitionsPanel } from "./ToolDefinitionsPanel";
+import { SessionInfoPanel } from "./SessionInfoPanel";
 import { AgentSessionPanel } from "./AgentSessionPanel";
 import { SubagentViewer } from "./SubagentViewer";
 import { TerminalPanel } from "./TerminalPanel";
@@ -73,18 +72,13 @@ import type { McpErrorResponse, ProjectTrustStatus } from "@/lib/api-types";
 import type { ChatInputHandle } from "./ChatInput";
 import type { AgentEndInfo, NewSessionChoices } from "@/hooks/useAgentSession";
 import type { SessionStatsInfo } from "@/lib/pi-types";
-import { formatActiveDuration, formatCompactCount, formatCostShort } from "@/lib/session-stats-format";
+import { cacheHitRatePercent, formatActiveDuration, formatCompactCount, formatCostShort } from "@/lib/session-stats-format";
 import type { FileViewerState } from "@/lib/file-viewer-state";
 import { PRESET_READ_ONLY, type ToolEntry } from "@/lib/tool-presets";
 import { getAgentsBadge, getSessionFamily } from "@/lib/session-family";
 import { getLastSettingsSection, settingsSectionRequiresProject, type SettingsSection } from "@/lib/settings-navigation";
 
 type SessionCopyField = "file" | "id" | "projectDir" | "gitBranch" | "gitWorktree";
-type AutoNameStatus =
-  | { kind: "idle" }
-  | { kind: "naming" }
-  | { kind: "success" }
-  | { kind: "error"; message: string };
 
 const TOP_BAR_ICON_BUTTON_SIZE = 36;
 const AGENT_PANEL_WIDTH = 420;
@@ -162,6 +156,7 @@ export function AppShell() {
   useEffect(() => {
     setTrajectorySessionId(null);
   }, [selectedSession?.id]);
+  // 「对话 | 轨迹」是二选一的标签：只改这一个状态，不碰顶栏的下拉面板（activeTopPanel）。
   const handleChatViewChange = useCallback((view: ChatView) => {
     setTrajectorySessionId(view === "trajectory" ? selectedSessionRef.current?.id ?? null : null);
   }, []);
@@ -358,7 +353,6 @@ export function AppShell() {
   const [systemInfoLoading, setSystemInfoLoading] = useState(false);
   const systemInfoLoaderRef = useRef<(() => Promise<void>) | null>(null);
   const systemInfoLoadIdRef = useRef(0);
-  const systemBtnRef = useRef<HTMLButtonElement>(null);
 
   const handleSystemPromptChange = useCallback((prompt: string | null) => {
     setSystemPrompt(prompt);
@@ -377,10 +371,6 @@ export function AppShell() {
 
   // Session stats (tokens + cost) — populated by ChatWindow, displayed in top bar
   const [sessionStats, setSessionStats] = useState<SessionStatsInfo | null>(null);
-  const [autoNameStatus, setAutoNameStatus] = useState<AutoNameStatus>({ kind: "idle" });
-  const autoNameTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const activeSessionIdRef = useRef<string | null>(selectedSession?.id ?? null);
-  activeSessionIdRef.current = selectedSession?.id ?? null;
   const handleSessionStatsChange = useCallback((stats: SessionStatsInfo | null) => {
     setSessionStats(stats);
   }, []);
@@ -397,7 +387,6 @@ export function AppShell() {
   useEffect(() => {
     return () => {
       if (sessionCopyTimerRef.current) clearTimeout(sessionCopyTimerRef.current);
-      if (autoNameTimerRef.current) clearTimeout(autoNameTimerRef.current);
     };
   }, []);
 
@@ -408,7 +397,7 @@ export function AppShell() {
   }, []);
 
   // Single active panel — only one dropdown open at a time
-  const [activeTopPanel, setActiveTopPanel] = useState<"agents" | "branches" | "system" | "tools" | "session" | null>(null);
+  const [activeTopPanel, setActiveTopPanel] = useState<"agents" | "branches" | "session" | null>(null);
   const [topPanelPos, setTopPanelPos] = useState<{ top: number; left: number; width: number } | null>(null);
 
   useEffect(() => {
@@ -427,8 +416,13 @@ export function AppShell() {
     if (rightPanelFullWidth) setActiveTopPanel(null);
   }, [rightPanelFullWidth]);
 
+  // 代理切换器、分支导航、会话信息三个按钮都只在对话视图里画；轨迹一打开，它们的下拉就没有按钮可点了，一并收起。
+  useEffect(() => {
+    if (openTrajectorySessionId !== null) setActiveTopPanel(null);
+  }, [openTrajectorySessionId]);
+
   const toggleTopPanel = useCallback((
-    panel: "agents" | "branches" | "system" | "tools" | "session",
+    panel: "agents" | "branches" | "session",
     keepMobileToolbarOpen = false,
   ) => {
     if (isMobile) setSidebarOpen(false);
@@ -436,13 +430,10 @@ export function AppShell() {
     if (isMobile && isNarrowMobile && keepMobileToolbarOpen) setMobileToolbarMoreOpen(true);
   }, [isMobile, isNarrowMobile]);
 
-  const handleSystemInfoToggle = useCallback((
-    panel: "system" | "tools",
-    keepMobileToolbarOpen = false,
-  ) => {
-    const opening = activeTopPanel !== panel;
-    toggleTopPanel(panel, keepMobileToolbarOpen);
-    if (!opening || systemInfoLoading) return;
+  // 向会话取一次系统提示词和工具定义。会话信息浮层每次切到这两页时调用（原来是点
+  // 顶栏「系统」「工具」按钮时调用），所以看到的总是此刻的，不是上一次的。
+  const refreshSystemInfo = useCallback(() => {
+    if (systemInfoLoading) return;
 
     const load = systemInfoLoaderRef.current;
     if (!load) return;
@@ -455,7 +446,7 @@ export function AppShell() {
         setSystemInfoLoading(false);
       }
     });
-  }, [activeTopPanel, systemInfoLoading, toggleTopPanel]);
+  }, [systemInfoLoading]);
 
   const openSessionStatsPanel = useCallback(() => {
     if (isMobile) setSidebarOpen(false);
@@ -532,10 +523,12 @@ export function AppShell() {
     const update = () => {
       const topBarRect = topBarRef.current!.getBoundingClientRect();
       if (activeTopPanel === "agents") {
+        const width = Math.min(AGENT_PANEL_WIDTH, topBarRect.width);
         setTopPanelPos({
           top: topBarRect.bottom,
-          left: topBarRect.left,
-          width: Math.min(AGENT_PANEL_WIDTH, topBarRect.width),
+          // 桌面端代理按钮在顶栏右侧（会话信息左边），面板靠右挂在它下面；手机上按钮仍在标签后面，面板靠左。
+          left: isMobile ? topBarRect.left : topBarRect.right - width,
+          width,
         });
         return;
       }
@@ -1087,42 +1080,6 @@ export function AppShell() {
     });
   }, [deliverSessionNotification, selectedSession, translate]);
 
-  const handleAutoName = useCallback(async () => {
-    const sessionId = selectedSession?.id;
-    if (!sessionId || autoNameStatus.kind === "naming") return;
-    if (autoNameTimerRef.current) clearTimeout(autoNameTimerRef.current);
-    setActiveTopPanel(null);
-    setAutoNameStatus({ kind: "naming" });
-
-    try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/auto-name`, {
-        method: "POST",
-      });
-      const body = (await response.json().catch(() => ({}))) as { title?: string; error?: string };
-      if (!response.ok || !body.title) {
-        throw new Error(body.error || `HTTP ${response.status}`);
-      }
-
-      const title = body.title.trim();
-      setRefreshKey((key) => key + 1);
-      if (activeSessionIdRef.current !== sessionId) return;
-      setSelectedSession((current) => current?.id === sessionId ? { ...current, name: title } : current);
-      setSessionStats((current) => current?.sessionId === sessionId ? { ...current, sessionName: title } : current);
-      setAutoNameStatus({ kind: "success" });
-      autoNameTimerRef.current = setTimeout(() => setAutoNameStatus({ kind: "idle" }), 1800);
-    } catch (error) {
-      if (activeSessionIdRef.current !== sessionId) return;
-      const message = error instanceof Error ? error.message : String(error);
-      setAutoNameStatus({ kind: "error", message });
-      autoNameTimerRef.current = setTimeout(() => setAutoNameStatus({ kind: "idle" }), 5000);
-    }
-  }, [autoNameStatus.kind, selectedSession?.id]);
-
-  useEffect(() => {
-    if (autoNameTimerRef.current) clearTimeout(autoNameTimerRef.current);
-    setAutoNameStatus({ kind: "idle" });
-  }, [selectedSession?.id]);
-
   const handleExplorerRefresh = useCallback(() => {
     setExplorerRefreshKey((k) => k + 1);
   }, []);
@@ -1583,84 +1540,17 @@ export function AppShell() {
           onTrajectoryIntent={warmTrajectory}
           iconWidth={mobile ? TOP_BAR_ICON_BUTTON_SIZE : undefined}
         />
-        {(() => {
-          // 上下文压缩后当前消息可能不再包含 user 消息，需同时参考会话文件的消息总数。
-          const hasMessages = Boolean(
-            selectedSession
-            && ((sessionStats?.userMessages ?? 0) > 0 || selectedSession.messageCount > 0),
-          );
-          const disabled = !selectedSession || selectedSession.transient || !hasMessages || autoNameStatus.kind === "naming";
-          const isSuccess = autoNameStatus.kind === "success";
-          const isError = autoNameStatus.kind === "error";
-          const label = autoNameStatus.kind === "naming"
-            ? translate("title.generating")
-            : isSuccess
-              ? translate("title.updated")
-              : isError
-                ? translate("title.failed")
-                : translate("title.generate");
-          const title = !selectedSession || selectedSession.transient
-            ? translate("title.unsaved")
-            : !hasMessages
-              ? translate("title.noMessages")
-              : isError
-                ? autoNameStatus.message
-                : translate("title.generateSession");
+        {mobile && renderSessionPanelButtons(true)}
+      </div>
+    );
+  };
 
-          return (
-            <button
-              type="button"
-              onClick={() => {
-                void handleAutoName();
-                if (mobile && isNarrowMobile) setMobileToolbarMoreOpen(true);
-              }}
-              disabled={disabled}
-              title={title}
-              aria-label={label}
-              style={{
-                display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-                width: mobile ? TOP_BAR_ICON_BUTTON_SIZE : undefined,
-                height: "100%", padding: mobile ? 0 : "0 12px",
-                background: "none", border: "none",
-                borderTop: "2px solid transparent",
-                borderRight: "1px solid var(--border)",
-                color: isError ? "#dc2626" : isSuccess ? "var(--accent)" : disabled ? "var(--text-dim)" : "var(--text-muted)",
-                cursor: disabled ? "not-allowed" : "pointer",
-                opacity: disabled && autoNameStatus.kind !== "naming" ? 0.45 : 1,
-                flexShrink: 0, fontSize: 11, whiteSpace: "nowrap",
-                transition: "color 0.1s, background 0.1s, opacity 0.1s",
-              }}
-              onMouseEnter={(event) => {
-                if (disabled) return;
-                event.currentTarget.style.color = isError ? "#dc2626" : "var(--text)";
-                event.currentTarget.style.background = "var(--bg-hover)";
-              }}
-              onMouseLeave={(event) => {
-                event.currentTarget.style.color = isError ? "#dc2626" : isSuccess ? "var(--accent)" : disabled ? "var(--text-dim)" : "var(--text-muted)";
-                event.currentTarget.style.background = "none";
-              }}
-              data-mobile-toolbar-action={mobile ? "name" : undefined}
-            >
-              {autoNameStatus.kind === "naming" ? (
-                <svg className="animate-spin" width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                  <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" opacity="0.25" />
-                  <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-                </svg>
-              ) : isSuccess ? (
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <polyline points="20 6 9 17 4 12" />
-                </svg>
-              ) : (
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <path d="m15 4 5 5L7 22l-5-5Z" />
-                  <path d="m14 5 5 5" />
-                  <path d="M6 4V2M5 3H3M19 19v3M17.5 20.5h3" />
-                </svg>
-              )}
-              {!mobile && <span>{label}</span>}
-            </button>
-          );
-        })()}
+  // 代理切换器和分支导航：手机上跟在标签后面（renderChatToolbarActions），桌面端挪到会话信息左边、
+  // 和它一起靠右（renderSessionBarEnd）。它们和会话信息一样属于对话，轨迹视图里不画。
+  const renderSessionPanelButtons = (mobile: boolean) => {
+    if (openTrajectorySessionId !== null) return null;
+    return (
+      <>
         {hasSubagentSessions && agentsBadge && (
           <button
             type="button"
@@ -1754,89 +1644,36 @@ export function AppShell() {
             hasSession
           />
         ))}
-        <button
-          ref={systemBtnRef}
-          type="button"
-          onClick={() => handleSystemInfoToggle("system", mobile)}
-          disabled={mobile && !showChat}
-          title={translate("system.prompt")}
-          aria-label={translate("system.prompt")}
-          aria-pressed={activeTopPanel === "system"}
-          style={{
-            display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-            width: mobile ? TOP_BAR_ICON_BUTTON_SIZE : undefined,
-            height: "100%", padding: mobile ? 0 : "0 12px",
-            background: activeTopPanel === "system" ? "var(--bg-selected)" : "none",
-            border: "none",
-            borderTop: activeTopPanel === "system" ? "2px solid var(--accent)" : "2px solid transparent",
-            borderRight: "1px solid var(--border)",
-            cursor: mobile && !showChat ? "not-allowed" : "pointer",
-            color: activeTopPanel === "system" ? "var(--text)" : "var(--text-muted)",
-            opacity: mobile && !showChat ? 0.45 : 1,
-            fontSize: 11, whiteSpace: "nowrap", transition: "color 0.1s, background 0.1s",
-          }}
-          onMouseEnter={(event) => {
-            if (mobile && !showChat) return;
-            event.currentTarget.style.color = "var(--text)";
-          }}
-          onMouseLeave={(event) => {
-            event.currentTarget.style.color = activeTopPanel === "system" ? "var(--text)" : "var(--text-muted)";
-          }}
-          data-mobile-toolbar-action={mobile ? "system" : undefined}
-        >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: systemPrompt ? "var(--accent)" : "var(--text-dim)", flexShrink: 0 }} aria-hidden="true">
-            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-            <polyline points="14 2 14 8 20 8" />
-            <line x1="8" y1="13" x2="16" y2="13" />
-            <line x1="8" y1="17" x2="13" y2="17" />
-          </svg>
-          {!mobile && <span>{translate("system.label")}</span>}
-        </button>
-        <button
-          type="button"
-          onClick={() => handleSystemInfoToggle("tools", mobile)}
-          disabled={mobile && !showChat}
-          title={translate("tools.title")}
-          aria-label={translate("tools.title")}
-          aria-pressed={activeTopPanel === "tools"}
-          style={{
-            display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-            width: mobile ? TOP_BAR_ICON_BUTTON_SIZE : undefined,
-            height: "100%", padding: mobile ? 0 : "0 12px",
-            background: activeTopPanel === "tools" ? "var(--bg-selected)" : "none",
-            border: "none",
-            borderTop: activeTopPanel === "tools" ? "2px solid var(--accent)" : "2px solid transparent",
-            borderRight: "1px solid var(--border)",
-            cursor: mobile && !showChat ? "not-allowed" : "pointer",
-            color: activeTopPanel === "tools" ? "var(--text)" : "var(--text-muted)",
-            opacity: mobile && !showChat ? 0.45 : 1,
-            fontSize: 11, whiteSpace: "nowrap", transition: "color 0.1s, background 0.1s",
-          }}
-          onMouseEnter={(event) => {
-            if (mobile && !showChat) return;
-            event.currentTarget.style.color = "var(--text)";
-          }}
-          onMouseLeave={(event) => {
-            event.currentTarget.style.color = activeTopPanel === "tools" ? "var(--text)" : "var(--text-muted)";
-          }}
-          data-mobile-toolbar-action={mobile ? "tools" : undefined}
-        >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: systemTools?.some((tool) => tool.active) ? "var(--accent)" : "var(--text-dim)", flexShrink: 0 }} aria-hidden="true">
-            <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.8-3.8a6 6 0 0 1-7.9 7.9l-6.9 6.9a2.1 2.1 0 0 1-3-3l6.9-6.9a6 6 0 0 1 7.9-7.9z" />
-          </svg>
-          {!mobile && <span>{translate("tools.label")}</span>}
-        </button>
+      </>
+    );
+  };
+
+  // 桌面端顶栏右侧：代理切换器、分支导航紧贴在会话信息左边，三者一起靠右。外层带 auto 边距；
+  // 会话信息按钮自己的 auto 边距在这里不起作用（外层只有内容那么宽）。轨迹视图里（或没有对话时）
+  // 外层一并不画，免得它的 auto 边距和文件开关的 auto 边距平分空位，把文件开关挤离右边（见 renderMainFileToggle）。
+  const renderSessionBarEnd = () => {
+    if (!showChat || openTrajectorySessionId !== null) return null;
+    return (
+      <div style={{ display: "flex", alignItems: "stretch", height: "100%", marginLeft: "auto", minWidth: 0 }}>
+        {renderSessionPanelButtons(false)}
+        {renderSessionStatsButton(false)}
       </div>
     );
   };
 
   const renderSessionStatsButton = (mobile: boolean) => {
-    if (!mobile && (!showChat || (!sessionStats && !contextUsage))) return null;
+    // 没有统计数字时也要画：会话信息浮层里还有系统提示词、工具定义两页，空白新会话发消息前就要能打开。
+    if (!mobile && !showChat) return null;
+    // 统计数字和系统提示词 / 工具定义这两页属于对话，轨迹视图里不画（文件开关顶替它靠右，见 renderMainFileToggle）。
+    if (openTrajectorySessionId !== null) return null;
 
     const tokens = sessionStats?.tokens;
     const cost = sessionStats?.cost ?? 0;
     const formatCompact = formatCompactCount;
     const costText = formatCostShort(cost);
+    // 缓存命中率与展开的会话信息同一算法、同一精度（一位小数）：99.6% 不能被四舍五入成 100%。
+    const cacheHitRate = tokens ? cacheHitRatePercent(tokens) : null;
+    const cacheHitText = cacheHitRate !== null ? `${cacheHitRate.toFixed(1)}%` : null;
 
     let contextColor = "var(--text-muted)";
     let desktopContextText: string | null = null;
@@ -1857,6 +1694,7 @@ export function AppShell() {
       tooltipParts.push(`out: ${tokens.output.toLocaleString(locale)}`);
       tooltipParts.push(`cache read: ${tokens.cacheRead.toLocaleString(locale)}`);
       tooltipParts.push(`cache write: ${tokens.cacheWrite.toLocaleString(locale)}`);
+      if (cacheHitText) tooltipParts.push(`cache hit rate: ${cacheHitText}`);
       if (cost > 0) tooltipParts.push(`cost: $${cost.toFixed(4)}`);
     }
     if (contextUsage?.contextWindow) {
@@ -1869,6 +1707,12 @@ export function AppShell() {
       (tokens && (tokens.input > 0 || tokens.output > 0))
       || costText
       || mobileContextText,
+    );
+    const hasDesktopValues = Boolean(
+      (tokens && (tokens.input > 0 || tokens.output > 0 || tokens.cacheRead > 0))
+      || cacheHitText
+      || costText
+      || desktopContextText,
     );
 
     return (
@@ -1970,6 +1814,15 @@ export function AppShell() {
                 {formatCompact(tokens.cacheRead)}
               </span>
             )}
+            {cacheHitText && (
+              // 靶心图标 = 命中；单独成项，因为只写过缓存、没读过时（0.0%）缓存读取那一项不显示。
+              <span title={`${translate("session.cacheHitRate")}: ${cacheHitText}`} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <circle cx="5" cy="5" r="4" /><circle cx="5" cy="5" r="1.2" />
+                </svg>
+                {cacheHitText}
+              </span>
+            )}
             {costText && (
               <span style={{ display: "flex", alignItems: "center", color: "var(--text)", fontWeight: 500 }}>
                 {costText}
@@ -1982,6 +1835,9 @@ export function AppShell() {
                 </svg>
                 {desktopContextText}
               </span>
+            )}
+            {!hasDesktopValues && (
+              <span style={{ color: "var(--text-dim)" }}>{translate("session.title")}</span>
             )}
           </>
         )}
@@ -2004,7 +1860,8 @@ export function AppShell() {
         aria-label={rightPanelOpen ? translate("files.hidePanel") : translate("files.showPanel")}
         data-mobile-toolbar-file={mobile ? "true" : undefined}
         style={{
-          marginLeft: !mobile && !sessionStats && !contextUsage ? "auto" : 0,
+          // 会话信息按钮在对话视图里一直在（自带 auto 边距）；没有聊天区、或轨迹视图里它不画时，才由这个按钮靠右。
+          marginLeft: (!mobile && !showChat) || openTrajectorySessionId !== null ? "auto" : 0,
           display: "flex", alignItems: "center", justifyContent: "center",
           width: TOP_BAR_ICON_BUTTON_SIZE, height: TOP_BAR_ICON_BUTTON_SIZE, padding: 0,
           visibility: covered ? "hidden" : "visible",
@@ -2027,65 +1884,6 @@ export function AppShell() {
   return (
     <>
     <style>{`
-      @keyframes session-info-pop {
-        0% {
-          opacity: 0;
-          transform: translateY(-24px);
-          filter: blur(6px);
-          box-shadow: 0 2px 8px rgba(0,0,0,0);
-        }
-        55% {
-          opacity: 1;
-          transform: translateY(0);
-          filter: blur(0);
-          background: color-mix(in srgb, var(--accent) 8%, var(--bg-panel));
-          box-shadow: 0 18px 44px rgba(37,99,235,0.16);
-        }
-        100% {
-          opacity: 1;
-          transform: translateY(0);
-          filter: blur(0);
-          background: var(--bg-panel);
-          box-shadow: 0 10px 28px rgba(0,0,0,0.10);
-        }
-      }
-      @keyframes session-info-light-wash {
-        0% {
-          opacity: 0;
-          transform: translateX(-110%) skewX(-16deg);
-        }
-        24% {
-          opacity: 0.42;
-        }
-        100% {
-          opacity: 0;
-          transform: translateX(115%) skewX(-16deg);
-        }
-      }
-      .session-info-popover {
-        position: relative;
-        overflow: hidden;
-        transform-origin: top right;
-        animation: session-info-pop 360ms ease-out both;
-        will-change: transform, opacity, filter, background, box-shadow;
-      }
-      .session-info-popover::after {
-        content: "";
-        position: absolute;
-        top: 0;
-        bottom: 0;
-        left: 0;
-        width: 44%;
-        pointer-events: none;
-        background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--accent) 24%, transparent), transparent);
-        animation: session-info-light-wash 620ms ease-out both;
-      }
-      @media (prefers-reduced-motion: reduce) {
-        .session-info-popover,
-        .session-info-popover::after {
-          animation: none;
-        }
-      }
       .mobile-session-stats {
         container-type: inline-size;
       }
@@ -2269,7 +2067,7 @@ export function AppShell() {
             <>
               {renderProjectTrustWarning(false)}
               {renderChatToolbarActions(false)}
-              {renderSessionStatsButton(false)}
+              {renderSessionBarEnd()}
             </>
           )}
           {!isMobile && renderMainFileToggle(false)}
@@ -2310,27 +2108,14 @@ export function AppShell() {
                   onToggleSubagentTab={handleToggleSubagentTab}
                 />
               )}
-              {activeTopPanel === "system" && (
-                <SystemPromptPanel
-                  loading={systemInfoLoading}
-                  prompt={systemPrompt}
-                  translate={translate}
-                />
-              )}
-              {activeTopPanel === "tools" && (
-                <ToolDefinitionsPanel
-                  loading={systemInfoLoading}
-                  tools={systemTools}
-                  translate={translate}
-                />
-              )}
               {activeTopPanel === "session" && (
-                <div className="session-info-popover" style={{
-                  background: "var(--bg-panel)",
-                  borderBottom: "1px solid var(--border)",
-                  boxShadow: "0 10px 28px rgba(0,0,0,0.10)",
-                  padding: "12px 16px",
-                }}>
+                <SessionInfoPanel
+                  systemPrompt={systemPrompt}
+                  tools={systemTools}
+                  systemInfoLoading={systemInfoLoading}
+                  onOpenSystemInfo={refreshSystemInfo}
+                  translate={translate}
+                >
                   {sessionStats ? (() => {
                     const totalActiveMs = sessionStats.totalActiveMs ?? 0;
                     const ws = selectedSession;
@@ -2360,13 +2145,12 @@ export function AppShell() {
                        [translate("session.total"), sessionStats.tokens.total.toLocaleString(locale)],
                     ];
                     const ctx = contextUsage ?? sessionStats.contextUsage;
+                    const cacheHitRate = cacheHitRatePercent(sessionStats.tokens);
                     const extraTokenRows = [
                        ...(sessionStats.cost > 0 ? [[translate("session.cost"), `$${sessionStats.cost.toFixed(4)}`]] : []),
                        ...(ctx?.contextWindow ? [[translate("session.context"), `${ctx.percent !== null ? `${ctx.percent.toFixed(1)}%` : "?"} / ${formatCompactCount(ctx.contextWindow)}`]] : []),
-                       // Cache hit rate = cache reads / (input + cache writes + cache reads) — the denominator covers all input-class tokens.
-                       ...(sessionStats.tokens.cacheRead + sessionStats.tokens.cacheWrite > 0 && sessionStats.tokens.cacheRead + sessionStats.tokens.cacheWrite + sessionStats.tokens.input > 0
-                         ? [[translate("session.cacheHitRate"), `${(sessionStats.tokens.cacheRead / (sessionStats.tokens.cacheRead + sessionStats.tokens.cacheWrite + sessionStats.tokens.input) * 100).toFixed(1)}%`]]
-                         : []),
+                       // 缓存命中率的算法在 cacheHitRatePercent()：顶栏统计共用同一个，两处不会对不上。
+                       ...(cacheHitRate !== null ? [[translate("session.cacheHitRate"), `${cacheHitRate.toFixed(1)}%`]] : []),
                     ];
                     const section = (
                       title: string,
@@ -2517,7 +2301,7 @@ export function AppShell() {
                        {translate("session.load")}
                     </div>
                   )}
-                </div>
+                </SessionInfoPanel>
               )}
             </div>
           )}

@@ -14,6 +14,17 @@ export function formatCostShort(cost: number): string | null {
   return cost >= 0.01 ? `$${cost.toFixed(2)}` : "<$0.01";
 }
 
+/**
+ * 缓存命中率（0–100）= 缓存读取 /（输入 + 缓存写入 + 缓存读取），分母覆盖所有输入类 token。
+ * 顶栏统计与展开的会话信息共用这一个算法，免得两处各算一遍对不上。
+ * 一次缓存读写都没有、或没有任何输入类 token 时没有意义，返回 null。
+ */
+export function cacheHitRatePercent(tokens: { input: number; cacheRead: number; cacheWrite: number }): number | null {
+  const denominator = tokens.cacheRead + tokens.cacheWrite + tokens.input;
+  if (tokens.cacheRead + tokens.cacheWrite <= 0 || denominator <= 0) return null;
+  return (tokens.cacheRead / denominator) * 100;
+}
+
 /** 0s · 42s · 3m 5s · 1h 20m */
 export function formatActiveDuration(ms: number): string {
   if (ms <= 0) return "0s";

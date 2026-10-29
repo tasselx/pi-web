@@ -23,7 +23,7 @@ export interface TrajectoryCellProps {
   /** 跨刷新、跨向前翻页都稳定的身份：来源条目 id，工具调用再加调用 id。 */
   recordId: string;
   kind: TrajectoryCellKind;
-  /** 单行摘要，太长由 CSS 省略；助手只有工具调用时为空串。 */
+  /** 单行摘要，最多 200 字并以「…」收尾，太宽由 CSS 省略；全文用 derive.ts 的 fullCellText()。助手只有工具调用时为空串。 */
   text: string;
   /** 用户 / 上下文 / 压缩摘要的原文。 */
   inputDetail?: string;

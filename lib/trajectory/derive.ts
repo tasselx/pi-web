@@ -70,16 +70,57 @@ function oneLine(text: string): string {
     : line;
 }
 
-function argumentSummary(input: Record<string, unknown> | undefined): string {
+/** 最能说明这次调用的那个参数的完整文字；没有字符串参数时是整个入参的 JSON。 */
+function primaryArgument(input: Record<string, unknown> | undefined): string {
   if (!input) return "";
   for (const key of PRIMARY_ARGUMENTS) {
     const value = input[key];
-    if (typeof value === "string" && value.trim()) return oneLine(value);
+    if (typeof value === "string" && value.trim()) return value;
   }
   for (const value of Object.values(input)) {
-    if (typeof value === "string" && value.trim()) return oneLine(value);
+    if (typeof value === "string" && value.trim()) return value;
   }
-  return Object.keys(input).length > 0 ? oneLine(JSON.stringify(input)) : "";
+  return Object.keys(input).length > 0 ? JSON.stringify(input) : "";
+}
+
+function argumentSummary(input: Record<string, unknown> | undefined): string {
+  return oneLine(primaryArgument(input));
+}
+
+/**
+ * 悬停提示用的完整摘要：与行里那句摘要同一内容，但不截断。
+ * 摘要为免扫完几 MB 的正文，只取开头 200 字并以「…」收尾，悬停时却要给全文；
+ * 全文在渲染行时按需取，不放进派生（派生每次轮询都重跑全部消息，不做重活）。
+ * 摘要没被截断时它本身就是全文，原样返回。各分支要与下面各 xxxCell 的 text 保持同一写法。
+ */
+export function fullCellText(cell: TrajectoryCellProps): string {
+  if (!cell.text.endsWith("…")) return cell.text;
+  switch (cell.kind) {
+    case "user":
+    case "compacted":
+      return cell.inputDetail ?? cell.text;
+    case "context": {
+      const customType = (cell.raw as { customType?: unknown } | undefined)?.customType;
+      return typeof customType === "string" && cell.inputDetail !== undefined
+        ? `${customType} · ${cell.inputDetail}`
+        : cell.text;
+    }
+    case "message": {
+      if (cell.outputDetail !== undefined) return cell.outputDetail;
+      // 只有错误信息的中断回复：摘要取的是 errorMessage。
+      const error = (cell.raw as { errorMessage?: unknown } | undefined)?.errorMessage;
+      return typeof error === "string" ? error : cell.text;
+    }
+    case "tool": {
+      const call = (cell.raw as { call?: ToolCallContent } | undefined)?.call;
+      if (call) {
+        const argument = primaryArgument(call.input);
+        return argument ? `${call.toolName} · ${argument}` : call.toolName;
+      }
+      // 用户用 ! 执行的 bash：没有工具调用，命令存在 inputDetail 里。
+      return cell.inputDetail !== undefined ? `${cell.toolName ?? "bash"} · ${cell.inputDetail}` : cell.text;
+    }
+  }
 }
 
 function userCell(message: UserMessage, entryId: string): NewCell {

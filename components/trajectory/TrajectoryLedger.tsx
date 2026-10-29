@@ -14,6 +14,7 @@
 import {
   Fragment, memo, useCallback, useLayoutEffect, useRef, useState, type KeyboardEvent, type MouseEvent,
 } from "react";
+import { fullCellText } from "@/lib/trajectory/derive";
 import {
   INITIAL_LEDGER_WINDOW, recordRowKey, resolveLedgerWindow, type LedgerWindow, type TableRecord,
 } from "@/lib/trajectory/ledger";
@@ -115,7 +116,8 @@ const LedgerRow = memo(function LedgerRow({
       <span className={css.tagSlot}>
         <span className={css.tag} data-kind={cell.kind}>{t(KIND_LABEL_KEY[cell.kind] ?? "kind.tool")}</span>
       </span>
-      <span className={css.text} title={cell.text || undefined}>
+      {/* 悬停提示给全文：行内摘要只有开头 200 字并以「…」收尾，提示不该再省略。 */}
+      <span className={css.text} title={fullCellText(cell) || undefined}>
         {hasCalls && (
           <button
             type="button"

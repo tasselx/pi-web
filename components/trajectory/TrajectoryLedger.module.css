@@ -13,6 +13,11 @@
   min-width: 0;
   overflow-x: hidden;
   overflow-y: auto;
+  /* 列表末尾留一小段空白：视图一路铺到窗口底，跟随末尾滚到底时最后一行不该贴着窗口下沿。
+     只要「一点」间隔（用户先后看过 24px、12px、8px、4px 都嫌大，定在 2px），所以比检查器正文的底部内边距（24px）小得多。
+     scroll-padding 让 ↑ ↓ / scrollIntoView("nearest") 选中最后一行时也保留这段空白。 */
+  padding-bottom: 2px;
+  scroll-padding-bottom: 2px;
   background: var(--bg);
   color: var(--text);
   font-size: 12px;

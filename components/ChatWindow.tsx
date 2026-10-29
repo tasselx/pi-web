@@ -250,6 +250,10 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, durationMs, cacheMis
   );
 }
 
+// 轨迹视图开着时聊天区的拖放处理：什么也不做（原因见 ChatWindow 里 useDragDrop 的调用处）。
+// 放在模块级，身份固定，useDragDrop 的 handleDrop 不会每次渲染都重建。
+const ignoreDrop = () => {};
+
 export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, sessionRunning, newSessionCwd, newSessionDraftKey, newSessionContextBar, trajectoryView, initialNewSessionChoices, onNewSessionChoicesChange, onAgentEnd, onToolEnd, onAttentionNeeded, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemToolsChange, onSystemInfoLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onOpenSettings, onContextUsageChange, onOpenFile, onFilesUploaded, onOpenSubagent, onAskInNewChat, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed, soundEnabled = true, onSoundToggle, playDoneSound = () => {}, unlockAudio, holdAudio }: Props) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
@@ -810,7 +814,10 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     onDrop(files.map((file) => ({ kind: "file", file })));
   }, [onDrop]);
 
-  const { isDragOver, handleDragEnter, handleDragOver, handleDragLeave, handleDrop } = useDragDrop(onDrop);
+  // 轨迹视图开着时输入框被它盖住、藏起来了，聊天区就不再是放置目标：否则拖进来的图片会悄悄挂在
+  // 看不见的输入框上，随下一条消息发出去。useDragDrop 里的 preventDefault 照常执行，所以浏览器
+  // 不会把整页换成这个文件。
+  const { isDragOver, handleDragEnter, handleDragOver, handleDragLeave, handleDrop } = useDragDrop(trajectoryView ? ignoreDrop : onDrop);
 
   const visibleMessages = messages.filter((m) => isMessageGroupAnchor(m) || m.role === "assistant");
   // Stable Map identity: `messages` doesn't change during streaming updates
@@ -1032,7 +1039,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
-      {isDragOver && (
+      {isDragOver && !trajectoryView && (
         <div className="pointer-events-none absolute inset-0 z-50 flex animate-[drop-zone-in_0.15s_ease_both] items-center justify-center bg-[rgba(37,99,235,0.06)] backdrop-blur-[1px]">
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
             {[0, 0.8, 1.6].map((delay) => (
@@ -1383,19 +1390,24 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
           />
         )}
         </div>}
-        {/* 盖满消息区；z-10 低于扩展对话框（z-90）和右上角通知（z-40），所以它们仍浮在上面。 */}
-        {trajectoryView && (
-          <div
-            id={TRAJECTORY_PANEL_ID}
-            role="tabpanel"
-            aria-labelledby={TRAJECTORY_TAB_ID}
-            className="absolute inset-0 z-10"
-            style={{ background: "var(--bg)" }}
-          >
-            {trajectoryView}
-          </div>
-        )}
       </div>
+
+      {/* 轨迹视图盖满整个聊天区，连下面的输入框和状态栏一起盖住（看轨迹时用不到它们），
+          高度一路铺到底。盖层挂在聊天区的根上、不在消息区里：输入栏只是被藏起来、并不收起，
+          消息区高度不变，列表一点不动，切回对话时滚动位置还在原处。z-10 低于扩展对话框（z-90）和右上角
+          通知（z-40），所以它们仍浮在上面；底部让开安全区（根节点的 padding-bottom），
+          免得内容被 iPhone 的 Home 条压住。 */}
+      {trajectoryView && (
+        <div
+          id={TRAJECTORY_PANEL_ID}
+          role="tabpanel"
+          aria-labelledby={TRAJECTORY_TAB_ID}
+          className="absolute inset-0 z-10"
+          style={{ background: "var(--bg)", bottom: "env(safe-area-inset-bottom)" }}
+        >
+          {trajectoryView}
+        </div>
+      )}
 
       {/* 迷你图轨道的图层：贴着聊天区右缘，从窗口顶一路铺到窗口底，盖在输入栏和状态栏之上
           （输入栏右侧本来就留着 36px 的空槽，即 ChatInput 的右内边距）。ChatMinimap 把轨道、
@@ -1490,7 +1502,9 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
         document.body,
       )}
 
-      <div className="relative shrink-0">
+      {/* 输入框和状态栏在轨迹盖层下面：用 visibility 藏起来（不可聚焦、读屏也跳过），不改它的
+          布局，所以消息区高度不变；也不卸载，输入框里的草稿和附件都还在。 */}
+      <div className="relative shrink-0" style={{ visibility: trajectoryView ? "hidden" : undefined }}>
         {/* 轨迹盖着列表时「回到最新」没有意义，而且它的层级（z 20）比盖层高，不藏会浮在上面。 */}
         {!isEmptyNew && !trajectoryView && (
           <div

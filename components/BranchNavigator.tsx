@@ -303,8 +303,12 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
   const topLevel = selectTopLevelBranches(tree);
   const hasContent = !noBranchReason && topLevel.length > 0;
 
+  // 顶栏里的图标按钮与 Debug 按钮一致：图标颜色只表示面板开没开（打开为强调色，未打开为暗色）。
+  // 之前按「有没有分支」着色，而顶栏里这个按钮只在有分支时才出现，图标恒为强调色，看不出选中与否。
+  // 堆叠版本带文字标题，仍按「有没有分支」着色。
+  const iconAccent = inline ? open : hasContent;
   const branchIcon = (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: hasContent ? "var(--accent)" : "var(--text-dim)", flexShrink: 0 }}>
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: iconAccent ? "var(--accent)" : "var(--text-dim)", flexShrink: 0 }}>
       <line x1="6" y1="3" x2="6" y2="15" />
       <circle cx="18" cy="6" r="3" />
       <circle cx="6" cy="18" r="3" />

@@ -1644,10 +1644,11 @@ export function AppShell() {
             }}
             data-mobile-toolbar-action={mobile ? "agents" : undefined}
           >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            {/* 图标颜色随面板开关变化（打开为强调色，未打开为暗色），与 Debug、分支按钮一致；
+                桌面端也只画图标，「Agents」留在 title / aria-label（agentsButtonLabel）里，数量和运行状态由徽标表示 */}
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" style={{ color: activeTopPanel === "agents" ? "var(--accent)" : "var(--text-dim)" }} aria-hidden="true">
               <rect x="5" y="7" width="14" height="11" rx="2" /><path d="M9 11h.01M15 11h.01M9 15h6M12 7V4M10 4h4" />
             </svg>
-            {!mobile && <span>{translate("agentSwitcher.title")}</span>}
             {renderAgentsBadge(agentsBadge, mobile)}
           </button>
         )}
@@ -1670,7 +1671,8 @@ export function AppShell() {
             }}
             data-mobile-toolbar-action="branches"
           >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: branchTree.length > 0 ? "var(--accent)" : "var(--text-dim)" }} aria-hidden="true">
+            {/* 图标颜色随面板开关变化（打开为强调色，未打开为暗色），与 Debug 按钮一致 */}
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: activeTopPanel === "branches" ? "var(--accent)" : "var(--text-dim)" }} aria-hidden="true">
               <line x1="6" y1="3" x2="6" y2="15" />
               <circle cx="18" cy="6" r="3" />
               <circle cx="6" cy="18" r="3" />
@@ -1684,6 +1686,8 @@ export function AppShell() {
             onLeafChange={handleBranchLeafChange}
             locked={branchSwitchLocked}
             inline
+            // 顶栏只画图标，和 Debug 按钮一致；「分支」二字留在 title / aria-label 里。
+            compact
             containerRef={topBarRef}
             open={activeTopPanel === "branches"}
             onToggle={() => toggleTopPanel("branches")}

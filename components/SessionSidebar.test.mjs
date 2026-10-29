@@ -120,6 +120,30 @@ test("only Shift skips the session deletion confirmation", () => {
   );
 });
 
+test("Generate title works on the row's own session and never on the open one", () => {
+  const body = callbackBody("generateTitle");
+  // The target is the row the menu was opened on …
+  assert.match(body, /const target = row\.family\.root;/);
+  // … so nothing in the callback may read which session is selected, now or after the await.
+  assert.doesNotMatch(body, /selected/i);
+  // One request per session: a repeated click on a busy row does nothing, a transient row has no file.
+  assert.match(body, /if \(target\.transient \|\| namingIdsRef\.current\.has\(target\.id\)\) return;/);
+  assert.match(body, /requestSessionTitle\(target\.id, fetch\)/);
+  // The busy mark is released before the outcome is used, so a failure frees the row too.
+  assert.match(body, /namingIdsRef\.current\.delete\(target\.id\);[\s\S]*?if \("error" in outcome\)/);
+  // The title goes onto the row that asked, by id; the open session follows through the catalogue merge.
+  assert.match(body, /session\.id === target\.id \? \{ \.\.\.session, name: outcome\.title \} : session/);
+  assert.match(source, /case "generate-title":\s*void generateTitle\(row\);\s*break;/);
+});
+
+test("the Generate title menu item reads its row's busy state and message count", () => {
+  const items = between("const sessionMenuItems = ", "const groupMenuItems");
+  assert.match(items, /const naming = entry\.id === "generate-title" && namingIds\.has\(row\.family\.root\.id\);/);
+  // A summary row's count is a placeholder, so only a hydrated row with no messages is turned away.
+  assert.match(items, /const noMessages = entry\.id === "generate-title" && !row\.family\.root\.detailsPending && row\.family\.root\.messageCount === 0;/);
+  assert.match(items, /disabled: entry\.disabledReason !== undefined \|\| naming \|\| noMessages/);
+});
+
 test("on a desktop the files sit below the sessions by default, both in view", () => {
   // The server renders the default placement on a desktop (useFilesPlacement
   // and useIsMobile's server snapshots): the stacked layout.

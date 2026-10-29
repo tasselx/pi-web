@@ -20,6 +20,7 @@ export type SessionMenuActionId =
   | "pin"
   | "unpin"
   | "rename"
+  | "generate-title"
   | "fork"
   | "mark-read"
   | "mark-unread"
@@ -33,8 +34,8 @@ export type SessionMenuEntry =
 
 /**
  * A session row's built-in menu. A transient session has no file yet, so it
- * gets none: pin, archive, rename, fork and delete would all act on a missing
- * file, and another tab could not load it.
+ * gets none: pin, archive, rename, generate title, fork and delete would all
+ * act on a missing file, and another tab could not load it.
  * In the archive view, Pin also restores (pin and archive exclude each other).
  */
 export function sessionMenuEntries(
@@ -48,6 +49,7 @@ export function sessionMenuEntries(
       { kind: "action", id: "unarchive", shortcut: "A" },
       { kind: "action", id: "pin", shortcut: "P" },
       { kind: "action", id: "rename", shortcut: "R" },
+      { kind: "action", id: "generate-title", shortcut: "G" },
       { kind: "action", id: "fork", shortcut: "F" },
       openNewTab,
       { kind: "separator" },
@@ -57,6 +59,7 @@ export function sessionMenuEntries(
   return [
     { kind: "action", id: context === "pinned" ? "unpin" : "pin", shortcut: "P" },
     { kind: "action", id: "rename", shortcut: "R" },
+    { kind: "action", id: "generate-title", shortcut: "G" },
     { kind: "action", id: "fork", shortcut: "F" },
     { kind: "action", id: status.unread ? "mark-read" : "mark-unread", shortcut: "U" },
     // A running family would come straight back: archiving waits for the run.
@@ -107,6 +110,30 @@ export function forkFailureMessage(code: string | undefined, error: string): { k
     case "request-denied":
       return { key: "sidebar.forkUnavailable" };
     default: return { key: "sidebar.forkFailed", params: { error } };
+  }
+}
+
+/** 「生成标题」请求的结果：服务端存下的标题，或失败原因（供 toast 显示）。 */
+export type SessionTitleOutcome = { title: string } | { error: string };
+
+/**
+ * 为 `sessionId` 生成标题（POST /api/sessions/[id]/auto-name，服务端本来就按 id 工作）。
+ * 目标由调用方显式传入：它是菜单所在那一行的会话，而不是读「当前选中的会话」，
+ * 所以生成期间切换会话不会改变它；返回值也只带标题，由调用方按同一个 id 去更新列表。
+ * 网络错误、非 2xx、没有标题都归为 { error }，不抛异常。
+ */
+export async function requestSessionTitle(
+  sessionId: string,
+  fetchImpl: typeof fetch,
+): Promise<SessionTitleOutcome> {
+  try {
+    const res = await fetchImpl(`/api/sessions/${encodeURIComponent(sessionId)}/auto-name`, { method: "POST" });
+    const data = await res.json().catch(() => ({})) as { title?: string; error?: string };
+    const title = typeof data.title === "string" ? data.title.trim() : "";
+    if (!res.ok || !title) return { error: data.error || `HTTP ${res.status}` };
+    return { title };
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
   }
 }
 

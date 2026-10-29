@@ -148,6 +148,17 @@ export function PencilIcon(props: SidebarIconProps) {
   return <SidebarIcon {...props}><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" /></SidebarIcon>;
 }
 
+/** A wand with sparkles: a session row's "Generate title" (the icon the old top-bar button had). */
+export function WandIcon(props: SidebarIconProps) {
+  return (
+    <SidebarIcon {...props}>
+      <path d="m15 4 5 5L7 22l-5-5Z" />
+      <path d="m14 5 5 5" />
+      <path d="M6 4V2M5 3H3M19 19v3M17.5 20.5h3" />
+    </SidebarIcon>
+  );
+}
+
 /** Filled dot: "mark as unread". */
 export function DotIcon(props: SidebarIconProps) {
   return <SidebarIcon {...props}><circle cx="12" cy="12" r="4.5" fill="currentColor" stroke="none" /></SidebarIcon>;

@@ -52,6 +52,7 @@ import {
   forkFailureMessage,
   projectNameMenuEntries,
   projectRenameRequest,
+  requestSessionTitle,
   sessionMenuEntries,
   type SessionMenuActionId,
 } from "@/lib/sidebar-actions";
@@ -112,9 +113,11 @@ import {
   RefreshIcon,
   RestoreIcon,
   SearchIcon,
+  SpinnerIcon,
   TerminalIcon,
   TrashIcon,
   UploadIcon,
+  WandIcon,
 } from "./SidebarIcons";
 
 interface FileManagerAvailability {
@@ -331,6 +334,7 @@ const SESSION_ACTION_LABEL_KEYS: Record<SessionMenuActionId, string> = {
   pin: "sidebar.pin",
   unpin: "sidebar.unpin",
   rename: "sidebar.rename",
+  "generate-title": "title.generate",
   fork: "sidebar.fork",
   "mark-read": "sidebar.markRead",
   "mark-unread": "sidebar.markUnread",
@@ -345,6 +349,7 @@ function sessionActionIcon(id: SessionMenuActionId): ReactNode {
     case "pin": return <PinIcon />;
     case "unpin": return <PinOffIcon />;
     case "rename": return <PencilIcon />;
+    case "generate-title": return <WandIcon />;
     case "fork": return <ForkIcon />;
     case "mark-read": return <DotOutlineIcon />;
     case "mark-unread": return <DotIcon />;
@@ -2043,6 +2048,31 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     }
   }, [loadSessions, showToast, t]);
 
+  // 生成标题（行菜单的 G）：目标是菜单所在那一行的会话，按 id 发请求，
+  // 不读「当前选中的会话」，所以生成期间切到别的会话也不会改写目标。
+  // 每个会话同时只发一个请求：ref 供同步判重，state 让菜单项显示「生成中」；别的会话的请求照常进行。
+  const namingIdsRef = useRef(new Set<string>());
+  const [namingIds, setNamingIds] = useState<ReadonlySet<string>>(() => new Set());
+  const generateTitle = useCallback(async (row: SessionRow) => {
+    const target = row.family.root;
+    if (target.transient || namingIdsRef.current.has(target.id)) return;
+    namingIdsRef.current.add(target.id);
+    setNamingIds(new Set(namingIdsRef.current));
+    showToast(t("title.generating"));
+    const outcome = await requestSessionTitle(target.id, fetch);
+    namingIdsRef.current.delete(target.id);
+    setNamingIds(new Set(namingIdsRef.current));
+    if ("error" in outcome) {
+      showToast(t("title.failedWithError", { error: outcome.error }));
+      return;
+    }
+    // 先按 id 把新标题写进目录，行立刻变；再重新读一次列表对齐服务端。
+    // 打开着的会话经 onSessionsChange 合并到页面，同样按 id，不会写到别的会话上。
+    setAllSessions((current) => current.map((session) => (session.id === target.id ? { ...session, name: outcome.title } : session)));
+    void loadSessions();
+    showToast(t("title.updated"));
+  }, [loadSessions, showToast, t]);
+
   // Open in new tab (the row menu's T): the row's session in a browser tab of
   // its own, by the same link its title carries. This tab's selection, cwd and
   // file tabs stay as they are, and nothing is asked of the server here: the
@@ -2062,6 +2092,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       case "pin": setFamilyPinned(family, true); break;
       case "unpin": setFamilyPinned(family, false); break;
       case "rename": startRename(family); break;
+      case "generate-title": void generateTitle(row); break;
       case "fork": void forkFamily(row); break;
       case "mark-read": markFamilyRead(family, true); break;
       case "mark-unread": markFamilyRead(family, false); break;
@@ -2418,15 +2449,21 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const sessionMenuItems = (row: SessionRow): SidebarMenuItem[] => sessionMenuEntries(row.context, row.status).map((entry, index) => {
     if (entry.kind === "separator") return { type: "separator", id: `separator-${index}` };
     const label = t(SESSION_ACTION_LABEL_KEYS[entry.id]);
+    // 生成标题：这一行的会话正在生成时显示「生成中」并禁用（防重复点击）；还没有消息的会话没东西可命名，
+    // 沿用旧按钮的提示。两种情况都只看这一行自己的会话，与当前选中的会话无关。
+    // detailsPending 的摘要行 messageCount 只是占位的 0，不能据此判断「没有消息」。
+    const naming = entry.id === "generate-title" && namingIds.has(row.family.root.id);
+    const noMessages = entry.id === "generate-title" && !row.family.root.detailsPending && row.family.root.messageCount === 0;
     return {
       type: "item",
       id: entry.id,
-      label: entry.id === "delete" ? `${label}…` : label,
-      icon: sessionActionIcon(entry.id),
+      label: naming ? t("title.generating") : entry.id === "delete" ? `${label}…` : label,
+      icon: naming ? <SpinnerIcon /> : sessionActionIcon(entry.id),
       shortcut: entry.shortcut,
       danger: entry.id === "delete",
-      disabled: entry.disabledReason !== undefined,
+      disabled: entry.disabledReason !== undefined || naming || noMessages,
       disabledReason: entry.disabledReason === "running" ? t("sidebar.cannotArchiveRunning") : undefined,
+      title: noMessages ? t("title.noMessages") : undefined,
       onSelect: ({ shiftKey }) => runSessionAction(entry.id, row, shiftKey),
     };
   });

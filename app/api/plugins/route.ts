@@ -12,6 +12,11 @@ import {
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 import { getProjectTrustStatus } from "@/lib/project-trust";
+import {
+  BUILTIN_EXTENSION_NAMES,
+  isBuiltinExtensionName,
+  withBuiltinExtensionEnabled,
+} from "@/lib/builtin-extensions";
 import { isPluginSourceCheckable } from "@/lib/plugin-updates";
 import { invalidateModelRuntimeWithExtensions } from "@/lib/model-runtime";
 import type {
@@ -29,7 +34,7 @@ import type {
 
 export const dynamic = "force-dynamic";
 
-type PluginAction = "install" | "remove" | "update" | "disable" | "enable";
+type PluginAction = "install" | "remove" | "update" | "disable" | "enable" | "set-builtin";
 
 function emptyCounts(): PluginResourceCounts {
   return { extensions: 0, skills: 0, prompts: 0, themes: 0 };
@@ -317,8 +322,11 @@ function collectResources(paths: ResolvedPaths): {
       kind: "extension",
       scope: toPluginScope(resource.metadata.scope),
       enabled: resource.enabled,
+      // 内置扩展（builtin:<name>）背后没有文件：打上标记，让界面不显示文件路径，改给开关（set-builtin）。
+      ...(resource.metadata.source === "builtin" ? { builtin: true as const } : {}),
     }));
-  totals.extensions += standaloneExtensions.filter((extension) => extension.enabled).length;
+  // 页脚总数统计的是插件/文件带来的资源；pi 自带的内置扩展不算，免得没装任何东西也显示 3 个扩展。
+  totals.extensions += standaloneExtensions.filter((extension) => extension.enabled && !extension.builtin).length;
   return { countsByPackage, resourcesByPackage, standaloneExtensions, totals };
 }
 
@@ -332,6 +340,10 @@ async function readPlugins(cwd: string): Promise<PluginsResponse> {
     cwd,
     agentDir,
     settingsManager,
+    // 不传这一项，SDK 的 resolve() 不会返回 builtin:<name>，面板里就看不到内置扩展；
+    // 传上后 -builtin:<name> 和项目覆盖已由 SDK 算进 enabled。只列 pi-web 实际加载的三个：
+    // llama.cpp 没加载（lib/builtin-extensions.ts 开头注释），列出来会让人以为它在运行。
+    builtinExtensions: [...BUILTIN_EXTENSION_NAMES],
   });
 
   const diagnostics: PluginDiagnostic[] = [];
@@ -422,6 +434,8 @@ export async function GET(req: Request) {
 // POST /api/plugins body: { action, source?, scope?, cwd }
 // enable/disable also take { packages: [{ source, scope }] } in place of
 // source/scope and add per-package `results` to the response.
+// set-builtin takes { name, enabled, cwd } instead: it switches one of pi's
+// built-in extensions through the global `extensions` list, as `pi config` does.
 export async function POST(req: Request) {
   if (!isApiRequestAllowed(req)) {
     return NextResponse.json({ error: "Untrusted API request" }, { status: 403 });
@@ -436,6 +450,8 @@ export async function POST(req: Request) {
       source?: string;
       scope?: PluginScope;
       packages?: unknown;
+      name?: unknown;
+      enabled?: unknown;
       cwd?: string;
     };
     if (!body.cwd) return NextResponse.json({ error: "cwd required" }, { status: 400 });
@@ -505,6 +521,24 @@ export async function POST(req: Request) {
       if (!source) return NextResponse.json({ error: "source required" }, { status: 400 });
       setPackagesDisabled(settingsManager, [source], scope, false);
       await settingsManager.flush();
+    } else if (body.action === "set-builtin") {
+      if (!isBuiltinExtensionName(body.name)) {
+        return NextResponse.json({ error: "name must be a built-in extension" }, { status: 400 });
+      }
+      if (typeof body.enabled !== "boolean") {
+        return NextResponse.json({ error: "enabled required" }, { status: 400 });
+      }
+      // 只写全局 extensions（与 pi config 的全局范围一致）：项目设置里的覆盖条目归项目文件管，
+      // 界面在那种情况下把开关关掉并说明，不会走到这里。
+      settingsManager.setExtensionPaths(
+        withBuiltinExtensionEnabled(settingsManager.getGlobalSettings().extensions ?? [], body.name, body.enabled),
+      );
+      await settingsManager.flush();
+      // SettingsManager 读写失败不抛错，只记下来；不读出来就会把没写成的开关报成成功。
+      const failure = settingsManager.drainErrors().find((entry) => entry.scope === "global");
+      if (failure) {
+        throw new Error(failure.path ? `${failure.path}: ${failure.error.message}` : failure.error.message);
+      }
     } else {
       return NextResponse.json({ error: `Unsupported action: ${body.action}` }, { status: 400 });
     }

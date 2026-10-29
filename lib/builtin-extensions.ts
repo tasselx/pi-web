@@ -229,6 +229,26 @@ export function createMcpExtensionConfigLoader(
 export const BUILTIN_EXTENSION_NAMES = ["codemode", "tool-search", "mcp"] as const;
 export type BuiltinExtensionName = typeof BUILTIN_EXTENSION_NAMES[number];
 
+export function isBuiltinExtensionName(value: unknown): value is BuiltinExtensionName {
+  return typeof value === "string" && (BUILTIN_EXTENSION_NAMES as readonly string[]).includes(value);
+}
+
+/**
+ * 开关一个内置扩展后的 `extensions` 列表，写法与 `pi config` 的全局范围一致：
+ * 先去掉所有指名 `builtin:<name>` 的条目（无前缀或带 `+` `-` `!`），再追加
+ * `+builtin:<name>` 或 `-builtin:<name>`。开启也写 `+` 而不是只删条目，这样它能压过
+ * `!builtin:*` 这类通配排除。其他条目原样保留。
+ */
+export function withBuiltinExtensionEnabled(
+  entries: readonly string[],
+  name: BuiltinExtensionName,
+  enabled: boolean,
+): string[] {
+  const path = `builtin:${name}`;
+  const kept = entries.filter((entry) => (/^[!+-]/.test(entry) ? entry.slice(1) : entry) !== path);
+  return [...kept, `${enabled ? "+" : "-"}${path}`];
+}
+
 export interface BuiltinExtensionSwitch {
   enabled: boolean;
   /** The settings file whose `extensions` entry turns it off. */

@@ -31,14 +31,27 @@ test("lists auto-discovered top-level extensions", async () => {
 
   assert.equal(response.status, 200);
   assert.deepEqual(body.packages, []);
-  assert.deepEqual(body.standaloneExtensions, [{
-    kind: "extension",
-    name: "rtk",
-    path: join(agentDir, "extensions", "rtk.ts"),
-    relativePath: "extensions/rtk.ts",
-    scope: "global",
-    enabled: true,
-  }]);
+  assert.deepEqual(body.standaloneExtensions, [
+    {
+      kind: "extension",
+      name: "rtk",
+      path: join(agentDir, "extensions", "rtk.ts"),
+      relativePath: "extensions/rtk.ts",
+      scope: "global",
+      enabled: true,
+    },
+    // pi 自带的内置扩展跟在文件扩展后面：没有文件路径、标记 builtin，llama.cpp 不在其中（pi-web 没加载它）。
+    ...["codemode", "tool-search", "mcp"].map((name) => ({
+      kind: "extension",
+      name: `builtin:${name}`,
+      path: `builtin:${name}`,
+      relativePath: `builtin:${name}`,
+      scope: "global",
+      enabled: true,
+      builtin: true,
+    })),
+  ]);
+  // 页脚总数只算文件和包带来的扩展，内置的不计入。
   assert.equal(body.totals.extensions, 1);
 });
 

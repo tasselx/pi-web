@@ -299,9 +299,12 @@ earlier version of this decision kept both file-only.
   how a session reaches its own tools, not which tools it has: a preset
   still bounds them, since a `direct` tool is callable only while active.
 
-`autoEnableCodemode` and the `±builtin:*` entries stay file-only; they keep
-working as in the CLI. The panel reports the ones that change what it offers
-(`-builtin:mcp`, `-builtin:codemode`, `autoEnableCodemode: false`).
+`autoEnableCodemode` stays file-only, and so do the project's `±builtin:*`
+entries; they keep working as in the CLI. The global ones are switched in
+Settings › Plugins (`set-builtin`, as `pi config` writes them), which an
+earlier version of this decision kept file-only. The panel reports the ones
+that change what it offers (`-builtin:mcp`, `-builtin:codemode`,
+`autoEnableCodemode: false`).
 
 `resolveActiveToolNames()` replaces `withExtensionTools()`. It respects
 `defaultActive: false`, carries extension tools that were activated at runtime

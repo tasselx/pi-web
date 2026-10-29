@@ -86,7 +86,7 @@ app/api/
   models-config/catalog/route.ts   GET models.dev pricing presets
   models-config/discover/route.ts  POST fetch a configured provider's upstream model list
   models-config/test/route.ts      POST test a configured model/provider
-  plugins/route.ts                 GET/POST package plugin management
+  plugins/route.ts                 GET/POST package plugin management; GET also lists pi's built-in extensions, POST set-builtin { name, enabled } switches one
   plugins/check/route.ts           POST check plugin package updates
   skills/route.ts                  GET/PATCH loaded skills, disable-model-invocation
   skills/content/route.ts          GET one loaded skill's bounded Markdown source, or ?document= a Markdown file in its folder

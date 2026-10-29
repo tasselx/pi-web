@@ -852,6 +852,11 @@ export interface PluginStandaloneExtensionInfo extends PluginResourceInfo {
   kind: "extension";
   scope: PluginScope;
   enabled: boolean;
+  /**
+   * pi's own `builtin:<name>` extension: no file behind `path`. `enabled` and
+   * `scope` come from the `extensions` settings; the switch writes the global list.
+   */
+  builtin?: true;
 }
 
 export type PluginUpdateState =

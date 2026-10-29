@@ -66,8 +66,8 @@ function packageKey(pkg: Pick<PluginPackageInfo, "source" | "scope">): string {
 
 /**
  * The packages a scope's group switch would change: those not already in the
- * requested state. Standalone extensions have no switch here, so they are
- * never included. Switching a group off also leaves out a filtered package:
+ * requested state. Standalone extensions are not packages, so they are never
+ * included (a built-in extension has a switch of its own). Switching a group off also leaves out a filtered package:
  * disabling empties its resource lists and nothing keeps the filters, so that
  * stays a decision for its own switch.
  */
@@ -563,6 +563,100 @@ function StandaloneExtensionDetail({ extension }: { extension: PluginStandaloneE
   );
 }
 
+// pi 自带的内置扩展（builtin:<name>）：背后没有文件，所以不显示路径，改说明它是什么；
+// 头部的开关和“重新加载会话”与包的头部一致，改的是全局 extensions 设置。
+function BuiltinExtensionDetail({
+  extension,
+  cwd,
+  busyKey,
+  actionError,
+  actionMessage,
+  sessionId,
+  onToggle,
+  onReloadSession,
+}: {
+  extension: PluginStandaloneExtensionInfo;
+  cwd: string;
+  busyKey: string | null;
+  actionError: string | null;
+  actionMessage: string | null;
+  sessionId: string | null;
+  onToggle: (extension: PluginStandaloneExtensionInfo, enabled: boolean) => void;
+  onReloadSession: () => void;
+}) {
+  const { t } = useI18n();
+  const busy = busyKey === extensionKey(extension);
+  const reloadBusy = busyKey === "reload";
+  // 项目自己的 extensions 设置里有这一项时它说了算（范围标签显示“项目”）：这里写的是全局设置，
+  // 改了也不会生效，所以把开关关掉，并用文字（不只是 tooltip）说明该去哪个文件改。
+  const decidedByProject = extension.scope === "project";
+  const reloadReasonId = useId();
+  const projectReasonId = useId();
+
+  return (
+    <ConfigDetailStack>
+      <div className="config-detail-heading">
+        <ConfigDetailHeader className="is-top-aligned">
+          <ConfigDetailHeaderInfo>
+            <ConfigScopeTag scope={extension.scope}>{scopeLabel(extension.scope, t)}</ConfigScopeTag>
+            <ConfigDetailTitle>{extension.name}</ConfigDetailTitle>
+          </ConfigDetailHeaderInfo>
+          <ConfigDetailActions>
+            <ConfigButton
+              size="small"
+              onClick={onReloadSession}
+              disabled={!sessionId || reloadBusy || busy}
+              aria-describedby={sessionId ? undefined : reloadReasonId}
+            >
+              {reloadBusy ? t("i18n.reloading") : t("i18n.reloadSession")}
+            </ConfigButton>
+            <ConfigSwitch
+              checked={extension.enabled}
+              loading={busy || reloadBusy}
+              disabled={decidedByProject}
+              describedBy={decidedByProject ? projectReasonId : undefined}
+              onChange={(enabled) => onToggle(extension, enabled)}
+              label={extension.enabled ? t("plugins.disableBuiltin") : t("plugins.enableBuiltin")}
+            />
+          </ConfigDetailActions>
+        </ConfigDetailHeader>
+        {!sessionId && (
+          <div id={reloadReasonId} className="config-detail-heading-note">
+            {t("i18n.openSessionToReload")}
+          </div>
+        )}
+        {decidedByProject && (
+          <div id={projectReasonId} className="config-detail-heading-note">
+            {t("plugins.builtinProject", { path: `${shortenPath(cwd)}/.pi/settings.json` })}
+          </div>
+        )}
+      </div>
+      <ConfigDetailGrid>
+        <ConfigDetailGridRow
+          label={t("i18n.status")}
+          tone="plain"
+          style={{ color: extension.enabled ? "var(--accent)" : "var(--text-dim)" }}
+        >
+          {statusLabel(extension.enabled ? "loaded" : "disabled", t)}
+        </ConfigDetailGridRow>
+        <ConfigDetailGridRow label={t("plugins.builtin")}>
+          {t("plugins.builtinNote")}
+        </ConfigDetailGridRow>
+      </ConfigDetailGrid>
+      {actionMessage && (
+        <div style={{ fontSize: 12, color: "#16a34a" }}>
+          {actionMessage}
+        </div>
+      )}
+      {actionError && (
+        <div style={{ fontSize: 12, color: "#ef4444", whiteSpace: "pre-wrap" }}>
+          {actionError}
+        </div>
+      )}
+    </ConfigDetailStack>
+  );
+}
+
 export function PluginsConfig({
   cwd,
   sessionId,
@@ -779,6 +873,35 @@ export function PluginsConfig({
       setBusyKey(null);
     }
   }, [cwd, t]);
+
+  // 内置扩展的开关：写全局 extensions（set-builtin），与包开关一样，要重新加载当前会话才生效。
+  const setBuiltinEnabled = useCallback(async (extension: PluginStandaloneExtensionInfo, enabled: boolean) => {
+    setBusyKey(extensionKey(extension));
+    setActionError(null);
+    setActionMessage(null);
+    setGroupStatus(null);
+    try {
+      const res = await fetch("/api/plugins", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "set-builtin",
+          name: extension.name.replace(/^builtin:/, ""),
+          enabled,
+          cwd,
+        }),
+      });
+      const next = (await res.json()) as PluginsResponse & { error?: string };
+      if (!res.ok || next.error) throw new Error(next.error ?? `HTTP ${res.status}`);
+      setData(next);
+      const message = enabled ? t("plugins.builtinEnabled") : t("plugins.builtinDisabled");
+      setActionMessage(sessionId ? `${message} ${t("agents.reloadRequired")}` : message);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyKey(null);
+    }
+  }, [cwd, sessionId, t]);
 
   // Behaves like the package switch, for every package of one scope: the
   // confirmation appears in the package detail and the session is reloaded by
@@ -1019,7 +1142,21 @@ export function PluginsConfig({
                 onInstall={installPlugin}
               />
             ) : loading ? null : selectedExtension ? (
-              <StandaloneExtensionDetail extension={selectedExtension} />
+              selectedExtension.builtin ? (
+                <BuiltinExtensionDetail
+                  key={extensionKey(selectedExtension)}
+                  extension={selectedExtension}
+                  cwd={cwd}
+                  busyKey={busyKey}
+                  actionError={actionError}
+                  actionMessage={actionMessage}
+                  sessionId={sessionId}
+                  onToggle={setBuiltinEnabled}
+                  onReloadSession={reloadSession}
+                />
+              ) : (
+                <StandaloneExtensionDetail extension={selectedExtension} />
+              )
             ) : selectedPackage ? (
               <PackageDetail
                 key={packageKey(selectedPackage)}

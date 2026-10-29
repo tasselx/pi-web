@@ -12,7 +12,7 @@ test("lightweight source rows are skipped for highlighted, diff, and preview vie
   const viewer = file.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === "TextFileViewer");
   const calculations = viewer.body.statements.filter((node) =>
     ts.isVariableStatement(node) && node.declarationList.declarations.some((declaration) =>
-      ["isDelimitedTable", "viewerContent", "sourceLines", "language", "isHtml", "isMarkdown", "hasPreview", "effectiveDisplayMode", "useLightweightSource", "lightweightSourceLines"].includes(declaration.name.getText(file)),
+      ["isBinary", "isDelimitedTable", "viewerContent", "sourceLines", "language", "isHtml", "isMarkdown", "hasPreview", "effectiveDisplayMode", "useLightweightSource", "lightweightSourceLines"].includes(declaration.name.getText(file)),
     ),
   ).map((node) => node.getText(file)).join("\n");
   const { outputText } = ts.transpileModule(`
@@ -36,6 +36,9 @@ test("lightweight source rows are skipped for highlighted, diff, and preview vie
   }
   // A CSV/TSV table previews a loaded prefix too; markdown waits for the whole file.
   assert.equal(render({ ...large, truncated: true }, "preview", false, false, false, "/tmp/data.csv"), null);
+  // A binary file has no Preview, whatever its extension (#1401).
+  assert.equal(render({ ...large, binary: true }, "preview", false, false, false, "/tmp/data.csv").length, 1_001);
+  assert.equal(render({ ...large, language: "html", binary: true }, "preview").length, 1_001);
   assert.equal(render({ ...large, language: "markdown", truncated: true }, "preview").length, 1_001);
   // A partly loaded HTML file previews too: the preview fetches it whole.
   assert.equal(render({ ...large, language: "html", truncated: true, size: 900 * 1024 }, "preview"), null);
@@ -87,7 +90,7 @@ test("the line-number gutter is pinned only in views of at most SOURCE_HIGHLIGHT
   // the real gutter styles in place.
   const calculations = file.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === "TextFileViewer").body.statements.filter((node) =>
     ts.isVariableStatement(node) && node.declarationList.declarations.some((declaration) =>
-      ["isDelimitedTable", "viewerContent", "sourceLines", "language", "isHtml", "isMarkdown", "hasPreview", "effectiveDisplayMode", "useLightweightSource", "lightweightSourceLines", "prismReady", "highlightedSource"].includes(declaration.name.getText(file)),
+      ["isBinary", "isDelimitedTable", "viewerContent", "sourceLines", "language", "isHtml", "isMarkdown", "hasPreview", "effectiveDisplayMode", "useLightweightSource", "lightweightSourceLines", "prismReady", "highlightedSource"].includes(declaration.name.getText(file)),
     ),
   ).map((node) => node.getText(file)).join("\n");
   const { outputText } = ts.transpileModule(`

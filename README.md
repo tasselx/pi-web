@@ -81,6 +81,7 @@ For port and hostname, command-line options override the corresponding environme
 | `PI_WEB_PASSWORD` | Enable browser password login; API clients may use Basic Auth with username `pi` | Authentication disabled |
 | `PI_WEB_IDLE_TIMEOUT_MS` | Session idle timeout in milliseconds, up to `2147483647`; `0` disables idle shutdown; invalid or out-of-range values use the default | `600000` (10 min) |
 | `PI_WEB_SHUTDOWN_DEADLINE_MS` | How long extensions get to handle `session_shutdown` before a closing session is disposed anyway, in milliseconds up to `2147483647`; `0`, invalid or out-of-range values use the default | `5000` (5 s) |
+| `PI_CODEMODE_MAX_WORKERS` | pi's limit on codemode scripts running at once, shared by every session and subagent in the server; pi's own default is `2`, and pi-web sets `8` when the variable is unset or empty. Each script may use up to 256 MB | `8` |
 
 Set `PI_WEB_APP_NAME` before starting the server (for example, `PI_WEB_APP_NAME='Work Pi' pi-web`). After changing it, restart the server to serve the new manifest; no rebuild is required. Updates to the name of an already installed PWA are managed by the browser and are not guaranteed to appear immediately. This does not change the page title or icons.
 
@@ -128,7 +129,7 @@ npx @tasselx/pi-web@latest
 - **Agent data**: Pi Web reads pi data from `~/.pi/agent` by default, including session files under `sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`. Set `PI_CODING_AGENT_DIR` to use another pi agent directory.
 - **Filesystem access**: Pi Web must be able to read the agent data directory and the working directories recorded by its sessions. Run Pi Web in the same filesystem environment as pi when sharing existing sessions.
 - **Shared configuration**: the Models panel uses pi's model, settings, and credential storage, so changes are visible to both interfaces. An open session applies a saved edit of its model when you select the model again.
-- **Code mode workers**: pi runs Code mode scripts in at most two sandbox workers at a time, shared by every session and in-process subagent of the Pi Web server. A further script waits up to 60 seconds for a free worker. If several sessions run scripts at once, set `PI_CODEMODE_MAX_WORKERS` to a larger whole number before starting Pi Web; each worker's script may use up to 256 MB.
+- **Code mode workers**: pi's own limit is two sandbox workers at a time; Pi Web raises it to eight unless `PI_CODEMODE_MAX_WORKERS` is set. The workers are shared by every session and in-process subagent of the Pi Web server, and a further script waits up to 60 seconds for a free worker. To change the limit, set `PI_CODEMODE_MAX_WORKERS` to a whole number before starting Pi Web; each worker's script may use up to 256 MB.
 - **File access boundary**: the file browser is limited to working directories selected in Pi Web and project or session roots it already knows about; it is not a general filesystem browser.
 - **Git worktrees**: see [Worktrees in Pi Web](./docs/worktrees.md) for switcher visibility, worktree creation, and removal behavior.
 

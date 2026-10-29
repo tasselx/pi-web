@@ -57,15 +57,47 @@ export async function checkSessionNavigation({ browser, base, artifacts, a, b, a
     }
     await content[id](target).waitFor({ state: "visible" });
   };
+  // A tab the browser opens itself is watched as a CDP target, not as a
+  // Playwright page: on CI, Playwright sometimes never reports such a tab
+  // (no "page" event within 30 s) although the tab loaded and ran. The opened
+  // URL is taken from the target, that tab is closed, and a page of this
+  // context loads the same URL.
+  const browserSession = await browser.newBrowserCDPSession();
+  await browserSession.send("Target.setDiscoverTargets", { discover: true });
+  const pageSession = await context.newCDPSession(page);
+  const { browserContextId } = (await pageSession.send("Target.getTargetInfo")).targetInfo;
+  await pageSession.detach();
   const newTab = async (open) => {
-    const opened = context.waitForEvent("page");
-    await open();
-    const tab = await opened;
+    const known = new Set((await browserSession.send("Target.getTargets")).targetInfos.map((info) => info.targetId));
+    let onTarget;
+    let timer;
+    const opened = new Promise((resolve, reject) => {
+      onTarget = ({ targetInfo }) => {
+        if (targetInfo.type !== "page" || targetInfo.browserContextId !== browserContextId || known.has(targetInfo.targetId)) return;
+        // A new tab starts on about:blank before it navigates to the link.
+        if (targetInfo.url.startsWith(base)) resolve(targetInfo);
+      };
+      browserSession.on("Target.targetCreated", onTarget);
+      browserSession.on("Target.targetInfoChanged", onTarget);
+      timer = setTimeout(() => reject(new Error("no new tab opened within 30 s")), 30_000);
+    });
+    // Awaited only once open() returns; a rejection meanwhile must not be unhandled.
+    opened.catch(() => {});
+    let target;
+    try {
+      await open();
+      target = await opened;
+    } finally {
+      clearTimeout(timer);
+      browserSession.off("Target.targetCreated", onTarget);
+      browserSession.off("Target.targetInfoChanged", onTarget);
+    }
+    await browserSession.send("Target.closeTarget", { targetId: target.targetId });
+    const tab = await context.newPage();
     watch(tab);
     // A cold tab under `next dev` may wait on a compile.
     tab.setDefaultTimeout(60_000);
-    // A new tab starts on about:blank before it navigates to the link.
-    await tab.waitForURL((url) => url.href !== "about:blank", { waitUntil: "domcontentloaded" });
+    await tab.goto(target.url, { waitUntil: "domcontentloaded" });
     return tab;
   };
   const markDocument = (target) => target.evaluate(() => { window.__piNavMarker = "kept"; });
@@ -233,6 +265,7 @@ export async function checkSessionNavigation({ browser, base, artifacts, a, b, a
     await context.tracing.stop({ path: join(artifacts, "session-navigation-trace.zip") }).catch(() => {});
     throw error;
   } finally {
+    await browserSession.detach().catch(() => {});
     await context.close();
   }
 }

@@ -49,6 +49,20 @@ export interface ToolSettingsResponse {
   codemodeInlineBudget: CodemodeInlineBudgetSetting;
 }
 
+/** Settings › General › 运行时防止系统休眠: the saved switch and what the host machine does with it. */
+export interface SleepInhibitStatus {
+  /** The saved switch (off by default). */
+  enabled: boolean;
+  /** Whether this machine has a way to hold the system awake at all. */
+  supported: boolean;
+  /** Why it has not, when `supported` is false. */
+  unsupportedReason?: string;
+  /** The hold is in place right now: switched on, a task is running, and the OS took it. */
+  active: boolean;
+  /** The last attempt to take the hold failed: why. Tasks are never affected by it. */
+  failure?: string;
+}
+
 export interface SkillSearchResult {
   package: string;
   installs: string;

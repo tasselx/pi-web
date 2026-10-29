@@ -1,4 +1,4 @@
-import type { ProjectTrustStatus } from "@/lib/api-types";
+import type { ProjectTrustStatus, SleepInhibitStatus } from "@/lib/api-types";
 
 /**
  * The rows a group switch would change: those not already in the requested
@@ -25,4 +25,21 @@ export function itemsToSwitch<T>(
 export function projectTrustReloadKey(trust: ProjectTrustStatus | null | undefined): string {
   if (!trust) return "";
   return JSON.stringify([trust.requiresTrust, trust.trusted, trust.decision, trust.decisionPath ?? null, trust.inherited]);
+}
+
+/**
+ * The line under Settings › General's "prevent system sleep" switch, from the
+ * server's own report of what it can do on its machine. It speaks only when
+ * something is wrong: an unsupported machine says why it cannot, and a failed
+ * attempt to take the hold says why, so the switch is never "on" for a hold
+ * that does not exist without saying so. Otherwise null; the switch and its
+ * description are all there is to say.
+ */
+export type SleepInhibitNote = { kind: "unavailable" | "failed"; reason: string };
+
+export function sleepInhibitNote(status: SleepInhibitStatus | null): SleepInhibitNote | null {
+  if (!status) return null;
+  if (!status.supported) return { kind: "unavailable", reason: status.unsupportedReason ?? "" };
+  if (status.enabled && status.failure) return { kind: "failed", reason: status.failure };
+  return null;
 }

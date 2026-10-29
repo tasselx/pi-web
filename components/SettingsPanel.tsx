@@ -16,7 +16,7 @@ import {
 import { useEnterSendMode, setEnterSendMode } from "@/hooks/useEnterSendMode";
 import { useFilesPlacement, setFilesPlacement } from "@/hooks/useFilesPlacement";
 import { sendAgentCommand } from "@/lib/agent-client";
-import type { AppUpdateResponse, ProjectTrustStatus, ToolSettingsResponse } from "@/lib/api-types";
+import type { AppUpdateResponse, ProjectTrustStatus, SleepInhibitStatus, ToolSettingsResponse } from "@/lib/api-types";
 import {
   setLastSettingsSection,
   settingsSectionRequiresProject,
@@ -34,6 +34,7 @@ import { AgentsConfig } from "./AgentsConfig";
 import { PluginsConfig } from "./PluginsConfig";
 import { McpConfig } from "./McpConfig";
 import { ConfigButton, ConfigSwitch } from "./SettingsUi";
+import { sleepInhibitNote } from "./settings-ui-helpers";
 import { FontSettings } from "./FontSettings";
 
 interface Props {
@@ -87,6 +88,11 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
   const [cacheMissNotices, setCacheMissNotices] = useState<boolean | null>(null);
   const [cacheMissNoticesSaving, setCacheMissNoticesSaving] = useState(false);
   const [cacheMissNoticesError, setCacheMissNoticesError] = useState<string | null>(null);
+  // 「运行时防止系统休眠」：开关和它在服务端那台机器上的真实状态都以服务端的回复为准。
+  const [sleepInhibit, setSleepInhibit] = useState<SleepInhibitStatus | null>(null);
+  const [sleepInhibitSaving, setSleepInhibitSaving] = useState(false);
+  const [sleepInhibitError, setSleepInhibitError] = useState<string | null>(null);
+  const sleepNote = sleepInhibitNote(sleepInhibit);
   const [pushRegistering, setPushRegistering] = useState(false);
   const [pushStatus, setPushStatus] = useState<{ kind: "ok" | "error"; message: string } | null>(null);
   // 「更新」小节：只在用户点击后才联网检查，不随设置页打开自动发请求。
@@ -146,6 +152,40 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
       });
     return () => { cancelled = true; };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetch("/api/sleep-inhibit")
+      .then(async (response) => {
+        const data = await response.json() as SleepInhibitStatus & { error?: string };
+        if (!response.ok) throw new Error(data.error ?? `HTTP ${response.status}`);
+        if (!cancelled) setSleepInhibit(data);
+      })
+      .catch((cause) => {
+        if (!cancelled) setSleepInhibitError(cause instanceof Error ? cause.message : String(cause));
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  const toggleSleepInhibit = async (enabled: boolean) => {
+    setSleepInhibitSaving(true);
+    setSleepInhibitError(null);
+    try {
+      const response = await fetch("/api/sleep-inhibit", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      });
+      const data = await response.json() as SleepInhibitStatus & { error?: string };
+      // 回复里的 failure 是「拿锁失败」的状态，不是请求失败；只有 HTTP 错误才算请求失败。
+      if (!response.ok) throw new Error(data.error ?? `HTTP ${response.status}`);
+      setSleepInhibit(data);
+    } catch (cause) {
+      setSleepInhibitError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setSleepInhibitSaving(false);
+    }
+  };
 
   // pi's showCacheMissNotices (#1265); the open chat is read again to show or drop them.
   const toggleCacheMissNotices = async (enabled: boolean) => {
@@ -459,6 +499,36 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
           {shellError && <p role="alert" className="settings-general-error">{shellError}</p>}
         </section>
       )}
+
+      <section className="settings-general-section">
+        <h3 className="settings-general-heading">{t("settings.power")}</h3>
+        <div className="settings-chat-options">
+          <div className="settings-chat-option settings-chat-switch-option">
+            <span>{t("settings.preventSleep")}</span>
+            <ConfigSwitch
+              // 开关亮着就必须是真的：这台机器不能防休眠时一律显示为关并禁用，原因写在下面。
+              checked={sleepInhibit?.enabled === true && sleepInhibit.supported}
+              disabled={sleepInhibit?.supported === false}
+              loading={(sleepInhibit === null && !sleepInhibitError) || sleepInhibitSaving}
+              label={t("settings.preventSleep")}
+              describedBy={sleepNote ? "settings-prevent-sleep-description settings-prevent-sleep-note" : "settings-prevent-sleep-description"}
+              onChange={(enabled) => void toggleSleepInhibit(enabled)}
+            />
+          </div>
+        </div>
+        <p id="settings-prevent-sleep-description" className="settings-general-description">{t("settings.preventSleepDescription")}</p>
+        {sleepNote && (
+          <p
+            id="settings-prevent-sleep-note"
+            role={sleepNote.kind === "failed" ? "alert" : "status"}
+            className="settings-general-error"
+            style={sleepNote.kind === "failed" ? undefined : { color: "var(--text-dim)" }}
+          >
+            {t(sleepNote.kind === "failed" ? "settings.preventSleepFailed" : "settings.preventSleepUnavailable", { reason: sleepNote.reason })}
+          </p>
+        )}
+        {sleepInhibitError && <p role="alert" className="settings-general-error">{sleepInhibitError}</p>}
+      </section>
 
       <section className="settings-general-section">
         <h3 className="settings-general-heading">{t("settings.pushPermission")}</h3>

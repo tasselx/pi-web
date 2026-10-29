@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { itemsToSwitch, projectTrustReloadKey } from "./settings-ui-helpers.ts";
+import { itemsToSwitch, projectTrustReloadKey, sleepInhibitNote } from "./settings-ui-helpers.ts";
 
 const rows = [
   { name: "on", on: true, pinned: false },
@@ -47,4 +47,24 @@ test("the page's trust status reloads a settings panel only when its decision ch
   ].map(projectTrustReloadKey));
   assert.equal(keys.size, 5);
   assert.ok(![...keys].includes(""));
+});
+
+test("the sleep switch's note speaks only when the hold cannot exist or failed", () => {
+  assert.equal(sleepInhibitNote(null), null);
+  // Working, switched on with nothing running yet, and switched off all say nothing more than the switch.
+  assert.equal(sleepInhibitNote({ enabled: true, supported: true, active: true }), null);
+  assert.equal(sleepInhibitNote({ enabled: true, supported: true, active: false }), null);
+  assert.equal(sleepInhibitNote({ enabled: false, supported: true, active: false }), null);
+
+  assert.deepEqual(
+    sleepInhibitNote({ enabled: false, supported: false, unsupportedReason: "No sleep inhibitor was found.", active: false }),
+    { kind: "unavailable", reason: "No sleep inhibitor was found." },
+  );
+  // Unavailable wins over a saved "on" from another machine's settings file.
+  assert.equal(sleepInhibitNote({ enabled: true, supported: false, unsupportedReason: "no", active: false })?.kind, "unavailable");
+  assert.deepEqual(
+    sleepInhibitNote({ enabled: true, supported: true, active: false, failure: "caffeinate: exited" }),
+    { kind: "failed", reason: "caffeinate: exited" },
+  );
+  assert.equal(sleepInhibitNote({ enabled: false, supported: true, active: false, failure: "stale" }), null);
 });

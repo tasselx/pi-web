@@ -57,6 +57,7 @@ import { createReadOnlyMcpPolicyExtension, createSubagentMcpPolicyExtension } fr
 import { createSubagentSkillsBinding } from "./subagent-skills";
 import { isNestedToolExecutionEvent } from "./agent-event-wire";
 import { collectLiveAssistantNotices, readShowCacheMissNotices, withSessionPrices } from "./transcript-notices-server";
+import { refreshSleepInhibitor } from "./sleep-inhibitor";
 import {
   appendClearedSessionToolSelection,
   appendSessionToolSelection,
@@ -453,6 +454,8 @@ export class AgentSessionWrapper {
       if (IDLE_RESET_EVENT_TYPES.has(event.type)) this.resetIdleTimer();
       this.emit(event.type === "message_end" ? this.withTranscriptNotices(event) : event);
       if (event.type === "agent_settled") this.notifyAgentRunCompleteIfIdle();
+      // 运行 / 压缩 / 空闲的转换都从这些事件经过：让「运行时防止系统休眠」按当前状态拿锁或放锁。
+      refreshSleepInhibitor();
     });
     this.resetIdleTimer();
   }
@@ -891,9 +894,11 @@ export class AgentSessionWrapper {
             this.pendingPromptCount = Math.max(0, this.pendingPromptCount - 1);
             this.resetIdleTimer();
             this.notifyAgentRunCompleteIfIdle();
+            refreshSleepInhibitor();
           };
 
           this.pendingPromptCount += 1;
+          refreshSleepInhibitor();
           // A prompt that may start a run first connects the session's MCP servers and
           // waits for the ones still connecting. The SDK runs before_agent_start before a
           // run has an abort signal, so Stop is honoured here: it ends the wait, and the
@@ -1356,6 +1361,8 @@ export class AgentSessionWrapper {
             }),
           },
         );
+        // `!` 命令也算在跑：开始和结束都没有 agent 事件，这里自己报一声。
+        refreshSleepInhibitor();
         try {
           const result = await execution;
           this.persistBashOnlySession();
@@ -1363,6 +1370,7 @@ export class AgentSessionWrapper {
         } finally {
           this.resetIdleTimer();
           invalidateSessionListCache();
+          refreshSleepInhibitor();
         }
       }
 
@@ -1399,6 +1407,8 @@ export class AgentSessionWrapper {
   destroy(): void {
     if (!this._alive) return;
     this._alive = false;
+    // 销毁后 isRunning() 为假：被销毁的会话不再占着防休眠锁。
+    refreshSleepInhibitor();
     this.disposeMcpHost();
     // Tell attached SSE listeners to drop this instance so the browser
     // EventSource errors and reconnects instead of staying OPEN on a dead wrapper.

@@ -28,7 +28,8 @@ import {
   setThinkingExpandedByDefault,
 } from "@/lib/thinking-expansion-preference";
 import { ModelsConfig } from "./ModelsConfig";
-import { setupPushSubscription } from "@/lib/push-client";
+import { getNotificationState, type NotificationState } from "@/lib/browser-notifications";
+import { hasPushRegistration, setupPushSubscription } from "@/lib/push-client";
 import { SkillsConfig } from "./SkillsConfig";
 import { AgentsConfig } from "./AgentsConfig";
 import { PluginsConfig } from "./PluginsConfig";
@@ -52,6 +53,14 @@ interface Props {
   /** Settings › MCP added a project server, which changed `cwd`'s trust (and may have trusted a fresh folder). */
   onProjectTrustChanged?: (cwd: string, status: ProjectTrustStatus) => void;
 }
+
+// 通知现状在设置页里的说法（granted：页面在后台时会弹出系统通知）。
+const NOTIFICATION_STATE_LABELS: Record<NotificationState, string> = {
+  granted: "settings.notificationsOn",
+  default: "settings.notificationsOff",
+  denied: "settings.notificationsBlocked",
+  unsupported: "settings.notificationsUnsupported",
+};
 
 export function SettingsSectionIcon({ section, size = 16, strokeWidth = 1.8 }: { section: SettingsSection; size?: number; strokeWidth?: number }) {
   const common = {
@@ -94,7 +103,13 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
   const [sleepInhibitError, setSleepInhibitError] = useState<string | null>(null);
   const sleepNote = sleepInhibitNote(sleepInhibit);
   const [pushRegistering, setPushRegistering] = useState(false);
+  // 浏览器的授权提示还没人回应：和“注册推送”分开，那段时间不能写成“注册中…”。
+  const [permissionWaiting, setPermissionWaiting] = useState(false);
   const [pushStatus, setPushStatus] = useState<{ kind: "ok" | "error"; message: string } | null>(null);
+  // 通知权限只有浏览器里读得到：挂载后再读，之前是 null。
+  const [notificationState, setNotificationState] = useState<NotificationState | null>(null);
+  // 页面有 service worker 注册时才有 Web Push 可注册（开发环境没有）。
+  const [pushAvailable, setPushAvailable] = useState(false);
   // 「更新」小节：只在用户点击后才联网检查，不随设置页打开自动发请求。
   const [updateChecking, setUpdateChecking] = useState(false);
   const [updateResult, setUpdateResult] = useState<AppUpdateResponse | null>(null);
@@ -105,10 +120,32 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
 
   useEffect(() => {
     setThinkingExpanded(isThinkingExpandedByDefault());
+    setNotificationState(getNotificationState());
+    void hasPushRegistration().then(setPushAvailable);
     void fetch("/api/web-auth")
       .then((response) => response.ok ? response.json() : null)
       .then((data: { enabled?: boolean } | null) => setWebAuthEnabled(data?.enabled === true))
       .catch(() => {});
+  }, []);
+
+  // 授权提示被收起、或权限改在地址栏的站点设置里时，requestPermission() 可能一直不返回：
+  // 权限一变，状态行和按钮就跟着变，不靠那个返回值。
+  useEffect(() => {
+    if (typeof navigator === "undefined" || !navigator.permissions) return;
+    let cancelled = false;
+    let status: PermissionStatus | null = null;
+    navigator.permissions.query({ name: "notifications" }).then((result) => {
+      if (cancelled) return;
+      status = result;
+      result.onchange = () => {
+        setNotificationState(getNotificationState());
+        setPermissionWaiting(false);
+      };
+    }).catch(() => {});
+    return () => {
+      cancelled = true;
+      if (status) status.onchange = null;
+    };
   }, []);
 
   const logOut = async () => {
@@ -232,17 +269,33 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
   };
 
   const registerPush = async () => {
-    if (pushRegistering) return;
-    setPushRegistering(true);
+    if (pushRegistering || permissionWaiting) return;
     setPushStatus(null);
     try {
       if (typeof window === "undefined" || !("Notification" in window)) {
         throw new Error("unsupported or not permitted");
       }
-      const permission = Notification.permission === "default"
-        ? await Notification.requestPermission()
-        : Notification.permission;
-      if (permission !== "granted") throw new Error("unsupported or not permitted");
+      if (Notification.permission === "default") {
+        // 权限必须在这次点击里申请：Firefox 和 Safari 不理会没有用户手势的请求，
+        // AppShell 在任务完成时自动申请的那次在它们上不会弹出授权提示。
+        // 授权提示可能一直没人理（Chrome 的静默提示只在地址栏留一个图标）：这段时间按钮写
+        // “等待授权…”并告诉用户去哪里点，不能写成“注册中…”让人以为程序卡住了。
+        setPermissionWaiting(true);
+        try {
+          await Notification.requestPermission();
+        } finally {
+          setPermissionWaiting(false);
+        }
+        // 不用 requestPermission() 的返回值：老 Safari 的它是 undefined，读回当前状态才稳。
+        const permission = getNotificationState();
+        setNotificationState(permission);
+        // 没授权（关掉了提示或点了拒绝）不是出错：状态行已经写明是未开启还是被屏蔽。
+        // 刚开启：页面通知已经可用，推送放到后台注册（任务完成时 AppShell 也会补注册），
+        // 按钮不挂在等推送服务上；要看结果的是之后那个“注册推送”。
+        if (permission === "granted" && pushAvailable) void setupPushSubscription(locale);
+        return;
+      }
+      setPushRegistering(true);
       const ok = await setupPushSubscription(locale);
       if (!ok) throw new Error("unsupported or not permitted");
       setPushStatus({ kind: "ok", message: t("settings.pushRegistered") });
@@ -534,16 +587,26 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
         <h3 className="settings-general-heading">{t("settings.pushPermission")}</h3>
         <p className="settings-general-description">{t("settings.pushPermissionDescription")}</p>
         <div className="settings-shell-option">
-          <span>{t("settings.pushPermission")}</span>
-          <button
-            type="button"
-            className="config-button config-button-small config-button-secondary"
-            disabled={pushRegistering}
-            onClick={() => void registerPush()}
-          >
-            {pushRegistering ? t("settings.pushRegisterLoading") : t("settings.pushRegister")}
-          </button>
+          <span>{notificationState ? t(NOTIFICATION_STATE_LABELS[notificationState]) : ""}</span>
+          {/* 没开通知时是“开启”；开了且页面有 Web Push 可注册时才有“注册推送”（iOS 主屏应用重注册用）。 */}
+          {(notificationState === "default" || (notificationState === "granted" && pushAvailable)) && (
+            <button
+              type="button"
+              className="config-button config-button-small config-button-secondary"
+              disabled={pushRegistering || permissionWaiting}
+              onClick={() => void registerPush()}
+            >
+              {permissionWaiting
+                ? t("settings.notificationsWaiting")
+                : pushRegistering
+                  ? t("settings.pushRegisterLoading")
+                  : t(notificationState === "default" ? "settings.notificationsEnable" : "settings.pushRegister")}
+            </button>
+          )}
         </div>
+        {permissionWaiting && (
+          <p role="status" className="settings-general-description">{t("settings.notificationsWaitingHint")}</p>
+        )}
         {pushStatus && (
           <p
             role="status"
@@ -580,7 +643,7 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
         </div>
       </section>
 
-      {/* 版本更新检查：沿用「后台推送」小节的按钮 + 状态行写法，不新增 CSS。 */}
+      {/* 版本更新检查：沿用「通知」小节的按钮 + 状态行写法，不新增 CSS。 */}
       <section className="settings-general-section">
         <h3 className="settings-general-heading">{t("settings.updates")}</h3>
         <p className="settings-general-description">{t("settings.updatesDescription")}</p>

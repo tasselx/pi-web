@@ -390,12 +390,8 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
 
   useEffect(() => {
     if (!quoteInputOpen || !quotedSelection) return;
-    quoteChatInputRef.current?.insertIfEmpty(buildQuotedSelection(
-      quotedSelection.text,
-      t("chat.quoteIntro"),
-      t("chat.quoteQuestion"),
-    ));
-  }, [quoteInputOpen, quotedSelection, t]);
+    quoteChatInputRef.current?.insertIfEmpty(buildQuotedSelection(quotedSelection.text));
+  }, [quoteInputOpen, quotedSelection]);
 
   useLayoutEffect(() => {
     const popover = quotePopoverRef.current;
@@ -443,17 +439,14 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
 
   const askSelectionHere = useCallback(() => {
     if (!quotedSelection) return;
-    chatInputRef?.current?.insertText(buildQuotedSelection(
-      quotedSelection.text,
-      t("chat.quoteIntro"),
-      t("chat.quoteQuestion"),
-    ));
+    // block：`> ` 必须在行首才是 Markdown 引用；输入框里已有文字时，先空一行再插入。
+    chatInputRef?.current?.insertText(buildQuotedSelection(quotedSelection.text), { block: true });
     // No `removeAllRanges()` here: inserting focuses the composer, and that
     // focus already collapses the page's selection. Calling it afterwards also
     // clears the composer's own selection and drops its caret to offset 0
     // (#1319), so the quote would be typed in front of instead of after.
     closeQuotedSelection();
-  }, [chatInputRef, quotedSelection, closeQuotedSelection, t]);
+  }, [chatInputRef, quotedSelection, closeQuotedSelection]);
 
   const askSelectionInNewChat = useCallback(async (prompt: string) => {
     const sourceSessionId = sessionIdRef.current ?? session?.id;
@@ -1483,7 +1476,10 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
             onClick={askSelectionHere}
             style={{ width: "auto", height: 35, flex: "0 0 auto", gap: 5, padding: "0 10px", border: "none", fontSize: 12, fontWeight: 500 }}
           >
-            <span aria-hidden="true" style={{ fontSize: 15 }}>@</span>
+            {/* 引号图标：这个按钮做的是「把选中文字作为引用块放进输入框」，不再用 @（那是提及文件的符号） */}
+            <svg width="13" height="13" viewBox="3 4 18 16" fill="currentColor" aria-hidden="true">
+              <path d="M4 6h6v7l-3 5H5l2-5H4zM14 6h6v7l-3 5h-2l2-5h-3z" />
+            </svg>
             <span>{t("chat.askInCurrent")}</span>
           </button>
           {onAskInNewChat && quotedSelection.sourceEntryId && !bashRunning && (

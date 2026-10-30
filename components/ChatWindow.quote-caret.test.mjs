@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-// "Ask here" inserts the quote and leaves the caret at its end so the question
+// "Quote" inserts the quote and leaves the caret at its end so what comes next
 // is typed after it. `window.getSelection().removeAllRanges()` clears the
 // focused textarea's selection too and drops the caret to offset 0 (#1319).
 test("asking about a selection in the current chat keeps the caret at the quote's end", async () => {

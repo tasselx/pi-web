@@ -3,6 +3,7 @@
 import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
+import { useLeaveGuard } from "@/hooks/useLeaveGuard";
 import { SessionSidebar, type SelectSessionOptions, type SessionSidebarControl } from "./SessionSidebar";
 import { ChatWindow } from "./ChatWindow";
 import { ChatViewTabs, type ChatView } from "./ChatViewTabs";
@@ -199,6 +200,9 @@ export function AppShell() {
       return ids;
     });
   }, []);
+  // 任何会话（含子代理）还在跑时，关标签页/刷新前让浏览器确认一次；
+  // 用侧栏轮询出的这份集合，不另发请求。
+  useLeaveGuard(runningSessionIds.size > 0);
   const agentsBadge = activeSessionFamily ? getAgentsBadge(activeSessionFamily.subagents, runningSessionIds) : null;
   const agentsButtonLabel = agentsBadge?.running
     ? translate("agentSwitcher.titleRunning", { count: agentsBadge.count })

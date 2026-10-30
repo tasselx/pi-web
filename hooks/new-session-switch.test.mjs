@@ -89,3 +89,60 @@ test("a composer unmounted before its session exists opens no event stream for i
   assert.equal((await sendAndSwitch("creating")).opened, 0);
   assert.equal((await sendAndSwitch("mounted")).opened, 1);
 });
+
+// 没配默认模型、也没手动选时，发送那一刻界面上还没有模型，会话用的是服务端按 pi 的默认选的；
+// “最近使用”要记下它起用的模型和推理级别，下一个新会话才继承得到。
+test("a first prompt records the model and level its session started with when none was shown", async () => {
+  const stored = new Map();
+  const originalStorage = globalThis.window.localStorage;
+  globalThis.window.localStorage = {
+    getItem: (key) => stored.get(key) ?? null,
+    setItem: (key, value) => { stored.set(key, value); },
+  };
+  const sources = [];
+  globalThis.EventSource = class {
+    readyState = 0;
+    onmessage = null;
+    onerror = null;
+    constructor(url) { this.url = url; sources.push(this); }
+    close() { this.readyState = 2; }
+    connect() {
+      this.readyState = 1;
+      this.onmessage?.({ data: JSON.stringify({ type: "connected", isStreaming: false }) });
+    }
+  };
+  globalThis.fetch = async (url, init = {}) => {
+    if (url.startsWith("/api/models")) return json({ models: {}, modelList: [], defaultModel: null });
+    if (url === "/api/agent/new") {
+      return json({ sessionId: "s1", model: { provider: "demo-a", modelId: "alpha" }, thinkingLevel: "medium" });
+    }
+    if (url === "/api/agent/s1" && init.body) return json({ success: true, data: null });
+    if (url === "/api/agent/s1") return json({ running: true, state: { isStreaming: true, isPromptRunning: true } });
+    throw new Error(`unexpected fetch ${url} ${init.body ?? ""}`);
+  };
+
+  const hook = renderHook(useAgentSession, {
+    session: null,
+    newSessionCwd: "/project",
+    newSessionDraftKey: "new:draft",
+    onSessionCreated: () => {},
+  });
+  try {
+    await settle();
+    hook.flush();
+    const sending = hook.result.handleSend("first message");
+    await settle();
+    sources.at(-1)?.connect();
+    await settle();
+    await sending;
+    await settle();
+    assert.deepEqual(JSON.parse(stored.get("pi-recent-models")), [
+      { provider: "demo-a", modelId: "alpha", thinkingLevel: "medium" },
+    ]);
+  } finally {
+    hook.unmount();
+    for (const source of sources) source.close();
+    if (originalStorage === undefined) delete globalThis.window.localStorage;
+    else globalThis.window.localStorage = originalStorage;
+  }
+});

@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import type { RecentModel } from "@/lib/recent-models";
 import { SelectorRow } from "./SelectorRow";
 
 export interface ModelSelectorOption {
@@ -26,10 +27,12 @@ interface ModelSelectorProps {
   ariaLabel?: string;
   variant?: "toolbar" | "field";
   placement?: "up" | "auto";
-  /** The model new sessions start with; its row gets a filled star. */
-  defaultValue?: { provider: string; modelId: string } | null;
-  /** Shows a star on every row that saves it as the default. */
-  onSetDefault?: (provider: string, modelId: string) => void;
+  /** Recently used model + reasoning pairs, newest first: listed above the providers while no filter is typed. */
+  recent?: RecentModel[];
+  /** The reasoning level in use (null: automatic), to mark the recent row that matches the current model and level. */
+  thinkingLevel?: string | null;
+  /** Picks a recent pair: its model, then its reasoning level. */
+  onSelectRecent?: (entry: RecentModel) => void;
 }
 
 const MODEL_FILTER_THRESHOLD = 8;
@@ -59,8 +62,9 @@ export function ModelSelector({
   ariaLabel,
   variant = "toolbar",
   placement = "up",
-  defaultValue,
-  onSetDefault,
+  recent,
+  thinkingLevel,
+  onSelectRecent,
 }: ModelSelectorProps) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
@@ -81,6 +85,16 @@ export function ModelSelector({
     if (group) group.options.push(option);
     else modelsByProvider.push({ provider: option.provider, options: [option] });
   }
+  // “最近使用”只在没输入筛选词时列出：筛选是在全部模型里找，最近那几行只会碍事。
+  const recentRows = onSelectRecent && !filter.trim()
+    ? (recent ?? []).map((entry) => ({
+        entry,
+        name: options.find((option) => option.provider === entry.provider && option.modelId === entry.modelId)?.name ?? entry.modelId,
+        // 模型和推理级别都对得上才算当前这一行（entry 里的 null 是自动，与 thinkingLevel 的 null 同义）。
+        active: entry.provider === value?.provider && entry.modelId === value?.modelId
+          && entry.thinkingLevel === (thinkingLevel ?? null),
+      }))
+    : [];
 
   const currentName = selectedLabel ?? (value
     ? options.find((option) => option.modelId === value.modelId && option.provider === value.provider)?.name ?? value.modelId
@@ -177,10 +191,11 @@ export function ModelSelector({
     else onReselect?.(option.provider, option.modelId);
   };
 
-  const saveDefault = (option: ModelSelectorOption) => {
+  const chooseRecent = (entry: RecentModel, active: boolean) => {
     setOpen(false);
     setFilter("");
-    onSetDefault?.(option.provider, option.modelId);
+    // 已经是当前的模型 + 推理级别，再选一次没有可做的事。
+    if (!active) onSelectRecent?.(entry);
   };
 
   return (
@@ -322,7 +337,7 @@ export function ModelSelector({
             )}
             <div style={{ minHeight: 0, overflowY: "auto" }}>
               {onClear && !filter.trim() && (
-                <SelectorRow active={!value} gutter={Boolean(onSetDefault)} onSelect={() => {
+                <SelectorRow active={!value} onSelect={() => {
                   setOpen(false);
                   setFilter("");
                   onClear();
@@ -330,14 +345,33 @@ export function ModelSelector({
                   <OptionLabel label={emptyLabel ?? "Default"} />
                 </SelectorRow>
               )}
+              {recentRows.length > 0 && (
+                <div>
+                  <div style={groupHeaderStyle(Boolean(onClear))}>{t("chat.recentModels")}</div>
+                  {recentRows.map(({ entry, name, active }) => (
+                    <SelectorRow
+                      key={`${entry.provider}:${entry.modelId}:${entry.thinkingLevel ?? ""}`}
+                      active={active}
+                      onSelect={() => chooseRecent(entry, active)}
+                    >
+                      <OptionLabel label={name} />
+                      {/* 同一个模型可能带着不同的推理级别出现多行，所以每行都写明 provider 和级别。 */}
+                      <span style={{ flexShrink: 0, marginLeft: "auto", paddingLeft: 12, color: "var(--text-dim)", fontSize: 11, fontWeight: 400 }}>
+                        {entry.provider} · {entry.thinkingLevel ?? "auto"}
+                      </span>
+                    </SelectorRow>
+                  ))}
+                </div>
+              )}
               {modelsByProvider.length === 0 ? (
                 <div style={{ padding: "8px 12px", color: "var(--text-dim)", fontSize: 12, whiteSpace: "nowrap" }}>
                   {filter.trim() ? t("chat.noMatchingModels") : "No available models"}
                 </div>
               ) : modelsByProvider.map((group, index) => (
                 <div key={group.provider}>
-                  {modelsByProvider.length > 1 && (
-                    <div style={{ padding: "6px 12px 4px", borderTop: index > 0 || onClear ? "1px solid var(--border)" : "none", color: "var(--text-dim)", fontSize: 10, fontWeight: 600, letterSpacing: 0, textTransform: "uppercase" }}>
+                  {/* 最近使用的分组占了列表顶部，其下的模型要有自己的标题，哪怕只有一个 provider。 */}
+                  {(modelsByProvider.length > 1 || recentRows.length > 0) && (
+                    <div style={groupHeaderStyle(index > 0 || Boolean(onClear) || recentRows.length > 0)}>
                       {group.provider}
                     </div>
                   )}
@@ -347,12 +381,6 @@ export function ModelSelector({
                         key={`${option.provider}:${option.modelId}`}
                         active={option.modelId === value?.modelId && option.provider === value?.provider}
                         onSelect={() => choose(option)}
-                        star={onSetDefault ? {
-                          isDefault: option.modelId === defaultValue?.modelId && option.provider === defaultValue?.provider,
-                          saveLabel: t("chat.saveDefaultModel"),
-                          defaultLabel: t("chat.defaultModel"),
-                          onSave: () => saveDefault(option),
-                        } : undefined}
                       >
                         <OptionLabel label={option.name} />
                       </SelectorRow>
@@ -366,6 +394,19 @@ export function ModelSelector({
       })()}
     </div>
   );
+}
+
+// 分组标题（“最近使用”和各 provider）；有分组在它上面时加一条分隔线。
+function groupHeaderStyle(divided: boolean): CSSProperties {
+  return {
+    padding: "6px 12px 4px",
+    borderTop: divided ? "1px solid var(--border)" : "none",
+    color: "var(--text-dim)",
+    fontSize: 10,
+    fontWeight: 600,
+    letterSpacing: 0,
+    textTransform: "uppercase",
+  };
 }
 
 function OptionLabel({ label }: { label: string }) {

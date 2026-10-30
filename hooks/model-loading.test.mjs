@@ -7,6 +7,7 @@ import { createJiti } from "jiti";
 
 const jiti = createJiti(import.meta.url, { interopDefault: true, moduleCache: false });
 const { missingCwdFromBody } = await jiti.import("../lib/missing-cwd.ts");
+const { readRecentModels, recentThinkingLevelFor } = await jiti.import("../lib/recent-models.ts");
 
 const source = ts.createSourceFile(
   "useAgentSession.ts",
@@ -40,14 +41,16 @@ function setup(fetchImpl) {
     controller: new AbortController(),
     newSessionCwd: "/project", session: null, isNew: true,
     sessionIdRef: { current: null }, thinkingLevelOverrideRef: { current: null }, newSessionModelOverrideRef: { current: null },
-    thinkingLevelPinsRef: { current: {} }, defaultThinkingLevelRef: { current: null },
+    thinkingLevelPinsRef: { current: {} }, defaultThinkingLevelRef: { current: null }, recentStartRef: { current: null },
     asConcreteThinkingLevel: (value) => (!value || value === "auto" ? null : value),
     fetch: fetchImpl,
     missingCwdFromBody,
+    readRecentModels,
+    recentThinkingLevelFor,
     MODELS_RETRY_DELAYS_MS: script(schedule.initializer.getText(source)).runInNewContext(),
     delay: async (ms) => { delays.push(ms); },
   };
-  for (const name of ["ModelError", "ModelsMissingCwd", "ModelNames", "ModelScopeWarnings", "ModelThinkingLevels", "ModelThinkingLevelMaps", "ModelList", "NewSessionDefaultModel", "NewSessionDefaultThinkingLevel", "SavedDefaultThinkingLevel", "NewSessionModel"]) {
+  for (const name of ["ModelError", "ModelsMissingCwd", "ModelNames", "ModelScopeWarnings", "ModelThinkingLevels", "ModelThinkingLevelMaps", "ModelList", "NewSessionDefaultModel", "NewSessionDefaultThinkingLevel", "RecentModels", "NewSessionModel"]) {
     context[`set${name}`] = (value) => writes.push([name, value]);
   }
   context.loadModels = loadScript.runInNewContext(context);
@@ -180,4 +183,17 @@ test("a picked model the folder offers keeps its pinned reasoning level; one it 
   started.context.newSessionModelOverrideRef.current = { provider: "other", modelId: "gone" };
   await started.run();
   assert.deepEqual(started.context.newSessionModelOverrideRef.current, { provider: "other", modelId: "gone" });
+});
+
+test("a picked reasoning level does not freeze the level automatic falls back to", async () => {
+  // 手动选了级别时显示的是它；之后选回“自动”要落在这个起点模型的级别上，不是上一个留下的。
+  const state = setup(async () => Response.json({
+    models: { "custom:test": "Test" },
+    modelList: [{ provider: "custom", id: "test", name: "Test" }],
+    defaultModel: { provider: "custom", modelId: "test" },
+    thinkingLevelPins: { "custom/test": "high" },
+  }));
+  state.context.thinkingLevelOverrideRef.current = "low";
+  await state.run();
+  assert.ok(state.writes.some(([name, value]) => name === "NewSessionDefaultThinkingLevel" && value === "high"));
 });

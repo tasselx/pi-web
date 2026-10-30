@@ -9,7 +9,7 @@ export async function checkModelSelector(page, { base, project, artifacts }) {
   await page.route(modelRoute, (route) => route.fulfill({ json: {
     models: Object.fromEntries(models.map((m) => [`${m.provider}/${m.id}`, m.name])),
     modelList: models, defaultModel: { provider: "e2e", modelId: "model-0" }, defaultThinkingLevel: "medium",
-    savedDefaultThinkingLevel: null, thinkingLevels: {}, thinkingLevelMaps: {}, thinkingLevelPins: {},
+    thinkingLevels: {}, thinkingLevelMaps: {}, thinkingLevelPins: {},
   } }));
   const trigger = page.locator(".model-selector.is-toolbar > button");
   const filter = page.getByRole("textbox", { name: "Filter models…", exact: true });

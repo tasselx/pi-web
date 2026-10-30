@@ -24,6 +24,14 @@ import {
 } from "@/lib/session-view-cache";
 import { clearDraft, getDraft, parkedNewSessionDraftKey, rekeyDraft, restoreDraftSubmission } from "@/lib/draft-store";
 import { getPreferredToolPreset, setPreferredToolPreset } from "@/lib/tool-preset-preference";
+import {
+  availableRecentModels,
+  readRecentModels,
+  recentThinkingLevelFor,
+  recordRecentModel,
+  restorableThinkingLevel,
+  type RecentModel,
+} from "@/lib/recent-models";
 import { CONFIGURED_TOOL_PRESET, getPresetFromToolNames, getToolNamesForPreset, type ToolEntry, type ToolPreset } from "@/lib/tool-presets";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import { mergeSessionStats, type SessionFileStats } from "@/lib/session-stats";
@@ -395,7 +403,6 @@ type ModelsResponse = {
   modelList?: ModelEntry[];
   defaultModel?: SelectedModel | null;
   defaultThinkingLevel?: string | null;
-  savedDefaultThinkingLevel?: string | null;
   thinkingLevels?: Record<string, string[]>;
   thinkingLevelMaps?: Record<string, Record<string, string | null>>;
   thinkingLevelPins?: Record<string, string>;
@@ -437,6 +444,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [pendingBash, setPendingBash] = useState<{ command: string; excludeFromContext: boolean } | null>(null);
   const [modelNames, setModelNames] = useState<Record<string, string>>({});
   const [modelList, setModelList] = useState<ModelEntry[]>([]);
+  // 浏览器里记下的“最近使用”原始列表（含当前工作区选不到的）；给界面的是 availableRecentModels() 过滤后的。
+  const [recentModels, setRecentModels] = useState<RecentModel[]>([]);
   const [modelError, setModelError] = useState<string | null>(null);
   // The session's or composer's folder, once a route said it no longer exists (#1422).
   // Kept apart by source: a model list read from a removed worktree's main repo
@@ -452,7 +461,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [toolPreset, setToolPreset] = useState<ToolPreset>(CONFIGURED_TOOL_PRESET);
   const [newSessionThinkingLevel, setNewSessionThinkingLevel] = useState<ConcreteThinkingLevel | null>(() => initialChoices?.thinkingLevel ?? null);
   const [newSessionDefaultThinkingLevel, setNewSessionDefaultThinkingLevel] = useState<ConcreteThinkingLevel | null>(null);
-  const [savedDefaultThinkingLevel, setSavedDefaultThinkingLevel] = useState<ConcreteThinkingLevel | null>(null);
   const [currentThinkingOverride, setCurrentThinkingOverride] = useState<ConcreteThinkingLevel | null>(null);
   const [liveThinkingLevel, setLiveThinkingLevel] = useState<ConcreteThinkingLevel | null>(null);
   const [retryInfo, setRetryInfo] = useState<{ attempt: number; maxAttempts: number; errorMessage?: string } | null>(null);
@@ -548,6 +556,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const thinkingLevelOverrideRef = useRef<ConcreteThinkingLevel | null>(initialChoices?.thinkingLevel ?? null);
   const thinkingLevelPinsRef = useRef<Record<string, string>>({});
   const defaultThinkingLevelRef = useRef<ConcreteThinkingLevel | null>(null);
+  // 新会话没手动选时的起点：最近使用里该工作区选得到的第一条（loadModels 算出）。它不是用户的
+  // “明确选择”，所以不进 newSessionModelOverrideRef / NewSessionChoices——换工作区时按新工作区的列表重算。
+  const recentStartRef = useRef<RecentModel | null>(null);
+  // ensure_session 回复里的、新会话实际起用的模型和推理级别。没手动选、也没配默认模型时，
+  // 发送那一刻的 displayModel 还是空的（模型是服务端按 pi 的默认选的），“最近使用”得靠它来记。
+  const startedSessionRef = useRef<{ model: SelectedModel | null; thinkingLevel: ConcreteThinkingLevel | null } | null>(null);
   const promptRunIdRef = useRef(0);
   const optimisticUserMessageKeyRef = useRef<string | null>(null);
   // The run whose prompt the server is known to have got: one of its events
@@ -1029,7 +1043,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // enabledModels scope atomically with AgentSession construction.
       const selectedModel = newSessionModelOverrideRef.current;
       const selectedThinkingLevel = thinkingLevelOverrideRef.current;
-      if (selectedModel) setPendingModel(selectedModel);
+      // 例外：没手动选时，“最近使用”的起点也要显式发给服务端。只显示不发送，会话会按服务端默认启动，
+      // 响应回来后显示被改回默认，用户看到的模型和实际用的就不一致了。
+      const recentStart = recentStartRef.current;
+      const startModel = selectedModel
+        ?? (recentStart ? { provider: recentStart.provider, modelId: recentStart.modelId } : null);
+      // 最近使用的推理级别只跟它的模型走：手动换了别的模型，就让服务端按 pin / 默认级别去算。
+      const startThinkingLevel = selectedThinkingLevel
+        ?? asConcreteThinkingLevel(recentThinkingLevelFor(recentStart, startModel));
+      if (startModel) setPendingModel(startModel);
       // Undefined means the user never overrode the loadout: omit the field entirely
       // so pi resolves settings.json defaultTools instead of being pinned to ours (#700).
       const toolNames = getToolNamesForPreset(toolPreset);
@@ -1041,9 +1063,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           cwd: newSessionCwd,
           type: "ensure_session",
           ...(toolNames !== undefined ? { toolNames } : {}),
-          ...(selectedModel ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
-          ...(selectedThinkingLevel
-            ? { thinkingLevel: selectedThinkingLevel }
+          ...(startModel ? { provider: startModel.provider, modelId: startModel.modelId } : {}),
+          ...(startThinkingLevel
+            ? { thinkingLevel: startThinkingLevel }
             : {}),
         }),
       });
@@ -1062,6 +1084,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       };
       const realId = result.sessionId;
       sessionIdRef.current = realId;
+      startedSessionRef.current = {
+        model: result.model ?? null,
+        thinkingLevel: asConcreteThinkingLevel(result.thinkingLevel),
+      };
       if (result.model && newSessionModelOverrideRef.current === selectedModel) {
         setPendingModel(result.model);
         if (!selectedModel) setNewSessionDefaultModel(result.model);
@@ -2161,6 +2187,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         throw new Error("No active session for the prompt");
       }
       setPromptMissingCwd(null);
+      // 服务端收下提示词后，把这次实际用的 模型 + 推理级别 记成“最近使用”：
+      // 模型选择器的最近列表和新会话的默认选择都读它（只存在这个浏览器里）。
+      // 界面上还没有模型、或推理级别是“自动”时，用新会话启动时服务端定下的那个：记下具体的级别，
+      // 下一个新会话才会原样显示它，而不是“自动”；没配默认模型的人也能记到。
+      const started = isNew ? startedSessionRef.current : null;
+      const usedModel = displayModel ?? started?.model ?? null;
+      if (usedModel) {
+        setRecentModels(recordRecentModel({
+          provider: usedModel.provider,
+          modelId: usedModel.modelId,
+          thinkingLevel: displayThinkingLevel ?? started?.thinkingLevel ?? null,
+        }));
+      }
       if (isSlashCommandPrompt && sentSessionId) {
         void waitForPromptSettlement(sentSessionId, promptRunId);
       }
@@ -2213,7 +2252,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setAgentPhase(null);
       dispatch({ type: "end" });
     }
-  }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, releaseUnconfirmedSend, cancelEventStreamGrace, closeEvents, composerDraftKey, dispatch, reconcileAgentState, restoreSubmission, editEntryId, setEdit]);
+  }, [isNew, newSessionCwd, newSessionModel, displayModel, displayThinkingLevel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, releaseUnconfirmedSend, cancelEventStreamGrace, closeEvents, composerDraftKey, dispatch, reconcileAgentState, restoreSubmission, editEntryId, setEdit]);
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean) => {
     if (agentRunningRef.current || bashRunningRef.current) return;
@@ -2324,29 +2363,33 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [isCompacting, loadContext]);
 
-  const handleModelChange = useCallback(async (provider: string, modelId: string) => {
+  // 返回切换有没有生效：选“最近使用”的一行要接着恢复推理级别，换模型失败时不该动当前模型的级别。
+  const handleModelChange = useCallback(async (provider: string, modelId: string): Promise<boolean> => {
     if (isNew) {
       const selectedModel = { provider, modelId };
       newSessionModelOverrideRef.current = selectedModel;
       setNewSessionModel(selectedModel);
       setPendingModel(selectedModel);
-      if (thinkingLevelOverrideRef.current === null) {
-        const pinned = thinkingLevelPinsRef.current[`${provider}/${modelId}`];
-        setNewSessionDefaultThinkingLevel(
-          asConcreteThinkingLevel(pinned) ?? defaultThinkingLevelRef.current,
-        );
-      }
+      // 默认级别跟着当前模型走，手动选过级别也一样：之后选回“自动”，落在这个模型的级别上，
+      // 而不是上一个模型的（否则最近使用里“自动”的那行会显示成上一个模型的级别）。
+      const pinned = thinkingLevelPinsRef.current[`${provider}/${modelId}`];
+      // 选回最近使用的起点模型时沿用它当时的推理级别，其余模型按 pin / 默认级别。
+      setNewSessionDefaultThinkingLevel(
+        asConcreteThinkingLevel(recentThinkingLevelFor(recentStartRef.current, selectedModel))
+          ?? asConcreteThinkingLevel(pinned)
+          ?? defaultThinkingLevelRef.current,
+      );
       const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
-      if (!sid) return;
+      if (!sid) return true;
       try {
         await sendAgentCommand(sid, { type: "set_model", provider, modelId });
       } catch (e) {
         console.error("Failed to set model:", e);
       }
-      return;
+      return true;
     }
     const sid = sessionIdRef.current;
-    if (!sid || modelSwitchPendingRef.current) return;
+    if (!sid || modelSwitchPendingRef.current) return false;
     const target = { provider, modelId };
     const previousOverride = currentModelOverride;
     modelSwitchPendingRef.current = true;
@@ -2359,6 +2402,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // the model, thinking level, and active leaf all advance together.
       modelSwitchPendingRef.current = false;
       await loadSession(sid);
+      return true;
     } catch (e) {
       console.error("Failed to set model:", e);
       modelSwitchPendingRef.current = false;
@@ -2370,6 +2414,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // A failed response can still follow a server-side write (for example, a
       // dropped connection), so let the session file settle the displayed model.
       await loadSession(sid, false, true);
+      return false;
     } finally {
       modelSwitchPendingRef.current = false;
       setModelSwitching(false);
@@ -2449,16 +2494,25 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setModelThinkingLevelMaps(d.thinkingLevelMaps ?? {});
     const nextModelList = d.modelList ?? [];
     setModelList(nextModelList);
+    // 最近使用：浏览器里的记录，以及新 composer 该默认选中的那一条（该工作区选得到的第一条）。
+    // 已经为它起了会话（ensure_session）时不再套用：会话实际启动的模型以服务端响应为准。
+    const recents = readRecentModels(nextModelList, d.thinkingLevels);
+    setRecentModels(recents.recent);
+    const freshComposer = isNew && !sessionIdRef.current;
+    const recentStart = freshComposer ? recents.start : null;
+    recentStartRef.current = recentStart;
     const displayDefaultModel = d.defaultModel
       ? nextModelList.find((m) => m.id === d.defaultModel?.modelId && m.provider === d.defaultModel?.provider)
       : undefined;
-    setNewSessionDefaultModel(displayDefaultModel
-      ? { provider: displayDefaultModel.provider, modelId: displayDefaultModel.id }
-      : null);
+    const defaultStartModel: SelectedModel | null = recentStart
+      ? { provider: recentStart.provider, modelId: recentStart.modelId }
+      : displayDefaultModel ? { provider: displayDefaultModel.provider, modelId: displayDefaultModel.id } : null;
+    if (!isNew || !sessionIdRef.current) {
+      setNewSessionDefaultModel(defaultStartModel);
+    }
     thinkingLevelPinsRef.current = d.thinkingLevelPins ?? {};
     defaultThinkingLevelRef.current = asConcreteThinkingLevel(d.defaultThinkingLevel);
-    setSavedDefaultThinkingLevel(asConcreteThinkingLevel(d.savedDefaultThinkingLevel));
-    if (isNew && !sessionIdRef.current) {
+    if (freshComposer) {
       // A picked model this folder does not offer (one carried over from the
       // composer this one replaced, or since scoped out) goes back to automatic.
       // An empty list offers nothing to compare with (a failed load answers
@@ -2473,58 +2527,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // The first listed model is not necessarily the runtime's automatic choice.
       // An `enabledModels` pattern may pin a thinking level (`anthropic/*:high`).
       // Like pi, apply it to the model a new session starts with.
-      const startModel = kept ? picked : displayDefaultModel && { provider: displayDefaultModel.provider, modelId: displayDefaultModel.id };
+      const startModel = kept ? picked : defaultStartModel;
       const pinned = startModel && d.thinkingLevelPins?.[`${startModel.provider}/${startModel.modelId}`];
-      if (thinkingLevelOverrideRef.current === null) {
-        setNewSessionDefaultThinkingLevel(
-          asConcreteThinkingLevel(pinned) ?? defaultThinkingLevelRef.current,
-        );
-      }
+      // 起点模型沿用它最近使用时的推理级别，其次是 pin，再其次是默认级别。手动选过级别时也照算：
+      // 显示的是手动级别，但之后选回“自动”要落在这个起点模型的级别上，不是上一个工作区的。
+      setNewSessionDefaultThinkingLevel(
+        asConcreteThinkingLevel(recentThinkingLevelFor(recentStart, startModel))
+          ?? asConcreteThinkingLevel(pinned)
+          ?? defaultThinkingLevelRef.current,
+      );
     }
   }, [isNew, newSessionCwd, session?.cwd]);
-
-  // Picking a model or reasoning level is session-scoped, as in the TUI. The
-  // selectors' star is the explicit Ctrl+S equivalent: it saves the global
-  // default new sessions start with and also selects it for this chat.
-  const saveDefaultPreferences = useCallback(async (
-    edit: { provider: string; modelId: string } | { thinkingLevel: ConcreteThinkingLevel },
-  ) => {
-    const cwd = newSessionCwd ?? session?.cwd;
-    const res = await fetch("/api/models/default", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...(cwd ? { cwd } : {}), ...edit }),
-    });
-    if (res.ok) return;
-    let detail = "";
-    try {
-      const body: unknown = await res.json();
-      if (body && typeof body === "object" && "error" in body && typeof body.error === "string") detail = body.error;
-    } catch {
-      // Non-JSON error responses fall back to the HTTP status.
-    }
-    throw new Error(detail || `HTTP ${res.status}`);
-  }, [newSessionCwd, session?.cwd]);
-
-  const reloadModelsQuietly = useCallback(() => {
-    // The star already updated the marker; a failed refresh keeps the old list.
-    loadModels().catch(() => {});
-  }, [loadModels]);
-
-  const handleSetDefaultModel = useCallback(async (provider: string, modelId: string) => {
-    try {
-      await saveDefaultPreferences({ provider, modelId });
-    } catch (e) {
-      addNotice({ type: "error", message: `Failed to save default model: ${e instanceof Error ? e.message : String(e)}` });
-      return;
-    }
-    addNotice({ type: "success", message: `Default model: ${provider}/${modelId}` });
-    setNewSessionDefaultModel({ provider, modelId });
-    if (displayModel?.provider !== provider || displayModel?.modelId !== modelId) {
-      await handleModelChange(provider, modelId);
-    }
-    reloadModelsQuietly();
-  }, [addNotice, displayModel, handleModelChange, reloadModelsQuietly, saveDefaultPreferences]);
 
   const handleBuiltinSlashCommand = useCallback(async (text: string): Promise<BuiltinSlashCommandResult> => {
     if (!text.startsWith("/")) return { handled: false };
@@ -2771,18 +2784,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [isNew]);
 
-  const handleSetDefaultThinkingLevel = useCallback(async (level: ConcreteThinkingLevel) => {
-    try {
-      await saveDefaultPreferences({ thinkingLevel: level });
-    } catch (e) {
-      addNotice({ type: "error", message: `Failed to save default reasoning level: ${e instanceof Error ? e.message : String(e)}` });
-      return;
-    }
-    addNotice({ type: "success", message: `Default reasoning level: ${level}` });
-    setSavedDefaultThinkingLevel(level);
-    if (displayThinkingLevel !== level) await handleThinkingLevelChange(level);
-    reloadModelsQuietly();
-  }, [addNotice, displayThinkingLevel, handleThinkingLevelChange, reloadModelsQuietly, saveDefaultPreferences]);
+  // “最近使用”的一行：先换模型，再恢复它当时的推理级别（当时是自动，或该模型已不支持它 → 自动）。
+  // 同一个模型只差推理级别的一行不再换一次模型：set_model 会往会话文件多写一条 model_change。
+  // 换模型没成功（失败，或上一次切换还没完）就不碰推理级别，免得改到没换掉的那个模型身上。
+  const handleSelectRecentModel = useCallback(async (entry: RecentModel) => {
+    const sameModel = displayModel?.provider === entry.provider && displayModel.modelId === entry.modelId;
+    if (!sameModel && !(await handleModelChange(entry.provider, entry.modelId))) return;
+    await handleThinkingLevelChange(
+      asConcreteThinkingLevel(restorableThinkingLevel(entry, modelThinkingLevels)) ?? "auto",
+    );
+  }, [displayModel, handleModelChange, handleThinkingLevelChange, modelThinkingLevels]);
 
   const handleToolPresetChange = useCallback(async (preset: ToolPreset) => {
     const toolNames = getToolNamesForPreset(preset);
@@ -3257,6 +3268,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     () => messageRenderKeys(entryIds, messages.length, messageKeyAliases),
     [entryIds, messages.length, messageKeyAliases],
   );
+  // 给模型选择器的“最近使用”：只留当前工作区的模型列表里还选得到的。
+  const availableRecents = useMemo(
+    () => availableRecentModels(recentModels, modelList),
+    [recentModels, modelList],
+  );
 
   return {
     // State
@@ -3268,8 +3284,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     notices: noticeState.visible, extensionDialog, waitingExtensionDialogCount, extensionCustomUi, waitingExtensionCustomUiCount, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
     isAutoModelSelection: isNew && newSessionModel === null,
     isAutoThinkingSelection: isNew && newSessionThinkingLevel === null,
-    defaultModel: newSessionDefaultModel,
-    savedDefaultThinkingLevel,
+    recentModels: availableRecents,
     agentPhase,
     isNew,
     editEntryId,
@@ -3289,7 +3304,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     cancelEdit: editEntryId ? cancelEdit : undefined,
     addNotice,
     setNoticePaused: setPausedNoticeId,
-    handleToolPresetChange, handleThinkingLevelChange, handleSetDefaultModel, handleSetDefaultThinkingLevel, loadTools, loadSlashCommands, setActiveLeafId, setData, setMessages, loadContext,
+    handleToolPresetChange, handleThinkingLevelChange, handleSelectRecentModel, loadTools, loadSlashCommands, setActiveLeafId, setData, setMessages, loadContext,
     scrollToBottom, scrollUserMsgToTop, scrollToMessage,
     dispatch, setAgentRunning, setForkingEntryId,
     bashRunning, pendingBash,

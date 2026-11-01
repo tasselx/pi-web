@@ -20,6 +20,10 @@ import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { TRAJECTORY_PANEL_ID, TRAJECTORY_TAB_ID } from "./ChatViewTabs";
 import { ExtensionStatusBar } from "./ExtensionStatusBar";
+import { HotkeysDialog } from "./HotkeysDialog";
+import { ImportSessionDialog } from "./ImportSessionDialog";
+import { ShareSessionDialog } from "./ShareSessionDialog";
+import { ExportSessionDialog } from "./ExportSessionDialog";
 import { AnsiText } from "./AnsiText";
 import { useI18n } from "@/hooks/useI18n";
 import { phaseLabel } from "@/lib/chat-phase-label";
@@ -35,6 +39,7 @@ import type { AppUpdateResponse } from "@/lib/api-types";
 import type { ToolEntry } from "@/lib/tool-presets";
 import type { SettingsSection } from "@/lib/settings-navigation";
 import { getTranscriptNotices, summarizeCacheMisses, type CacheMissSummary } from "@/lib/transcript-notices";
+import { summarizeMessagesContext, type MessageContextSummary } from "@/lib/context-breakdown";
 import { cacheMissSummaryText, TRANSCRIPT_NOTICE_WARNING_COLOR, TranscriptNoticeLines } from "@/components/TranscriptNotices";
 import { findChatScrollAnchor, type ChatScrollPosition } from "@/lib/chat-scroll-position";
 import {
@@ -77,7 +82,8 @@ interface Props {
   /** Registers the debug panel's read-only reader of this chat's stream and lease. */
   onDebugSnapshotReaderChange?: (reader: (() => DebugClientSession) | null) => void;
   onSessionStatsChange?: (stats: SessionStatsInfo | null) => void;
-  onSessionStatsPanelOpen?: () => void;
+  onSessionStatsPanelOpen?: (tab?: "overview" | "context" | "system" | "tools") => void;
+  onMessageContextSummaryChange?: (summary: MessageContextSummary | null) => void;
   /** Opens Settings on a section: a bare `/mcp` that pi's built-in MCP extension owns opens Settings › MCP. */
   onOpenSettings?: (section: SettingsSection) => void;
   onContextUsageChange?: (usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => void;
@@ -258,7 +264,7 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, durationMs, cacheMis
 const ignoreDrop = () => {};
 
 // 合并说明：参数表同时带上我们的 trajectoryView 和上游新增的 onDebugSnapshotReaderChange。
-export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, sessionRunning, newSessionCwd, newSessionDraftKey, newSessionContextBar, trajectoryView, initialNewSessionChoices, onNewSessionChoicesChange, onAgentEnd, onToolEnd, onAttentionNeeded, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemToolsChange, onSystemInfoLoaderChange, onDebugSnapshotReaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onOpenSettings, onContextUsageChange, onOpenFile, onFilesUploaded, onOpenSubagent, onAskInNewChat, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed, soundEnabled = true, onSoundToggle, playDoneSound = () => {}, unlockAudio, holdAudio }: Props) {
+export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, sessionRunning, newSessionCwd, newSessionDraftKey, newSessionContextBar, trajectoryView, initialNewSessionChoices, onNewSessionChoicesChange, onAgentEnd, onToolEnd, onAttentionNeeded, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemToolsChange, onSystemInfoLoaderChange, onDebugSnapshotReaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onMessageContextSummaryChange, onOpenSettings, onContextUsageChange, onOpenFile, onFilesUploaded, onOpenSubagent, onAskInNewChat, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed, soundEnabled = true, onSoundToggle, playDoneSound = () => {}, unlockAudio, holdAudio }: Props) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
   const completionNotificationsEnabled = session?.relation?.kind !== "subagent";
@@ -286,6 +292,14 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     return position && !position.atBottom ? position : null;
   });
   const [restoreAnchorReady, setRestoreAnchorReady] = useState(false);
+  const [hotkeysDialogOpen, setHotkeysDialogOpen] = useState(false);
+  const [shareSessionId, setShareSessionId] = useState<string | null>(null);
+  const [exportSessionId, setExportSessionId] = useState<string | null>(null);
+  const [importDialogState, setImportDialogState] = useState<{ open: boolean; initialPath?: string }>({ open: false });
+  const openHotkeysDialog = useCallback(() => setHotkeysDialogOpen(true), []);
+  const openShareDialog = useCallback((sid: string) => setShareSessionId(sid), []);
+  const openExportDialog = useCallback((sid: string) => setExportSessionId(sid), []);
+  const openImportDialog = useCallback((initialPath?: string) => setImportDialogState({ open: true, initialPath }), []);
 
   const {
     loading, error, messages, activeToolResults, entryIds, messageKeys, historyCursor, hasEarlierMessages, earlierTurnCount, streamingStore,
@@ -313,7 +327,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
   } = useAgentSession({
     session, sessionRunning, newSessionCwd, newSessionDraftKey, initialNewSessionChoices, onNewSessionChoicesChange, onAgentEnd: wrappedOnAgentEnd, onToolEnd, onAttentionNeeded, onSessionCreated, onSessionForked,
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemToolsChange, onSystemInfoLoaderChange, onSessionStatsPanelOpen,
-    onOpenSettings, onDebugSnapshotReaderChange, t,
+    onOpenSettings, onHotkeysOpen: openHotkeysDialog, onShareSessionOpen: openShareDialog, onExportSessionOpen: openExportDialog, onImportSessionOpen: openImportDialog, onDebugSnapshotReaderChange, t,
     deferInitialScroll: Boolean(pendingScrollRestore),
   });
   // Only whether a reply is streaming and has content yet: the chunks themselves
@@ -764,6 +778,26 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     onContextUsageChange?.(contextUsageRef.current);
   }, [ctxKey, onContextUsageChange]);
   useEffect(() => () => { onContextUsageChange?.(null); }, [onContextUsageChange]);
+
+  const messageContextSummary = useMemo(() => summarizeMessagesContext(messages), [messages]);
+  const msgSummaryKey = [
+    messageContextSummary.compactionTokens,
+    messageContextSummary.userTokens,
+    messageContextSummary.userCount,
+    messageContextSummary.assistantTextTokens,
+    messageContextSummary.assistantThinkingTokens,
+    messageContextSummary.assistantCount,
+    messageContextSummary.toolTrafficTokens,
+    messageContextSummary.toolCallCount,
+    messageContextSummary.toolResultCount,
+    messageContextSummary.toolTrafficByTool.length,
+  ].join("|");
+  const messageContextSummaryRef = useRef(messageContextSummary);
+  messageContextSummaryRef.current = messageContextSummary;
+  useEffect(() => {
+    onMessageContextSummaryChange?.(messageContextSummaryRef.current);
+  }, [msgSummaryKey, onMessageContextSummaryChange]);
+  useEffect(() => () => { onMessageContextSummaryChange?.(null); }, [onMessageContextSummaryChange]);
 
   // Images attach to the prompt. Other files go through the file explorer's
   // upload into the working directory, never replacing a file already there,
@@ -1566,6 +1600,38 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
         />
       </div>
       {isEmptyNew && <div className="min-h-0 flex-1" />}
+      {hotkeysDialogOpen && (
+        <HotkeysDialog onClose={() => setHotkeysDialogOpen(false)} />
+      )}
+      {shareSessionId && (
+        <ShareSessionDialog
+          sessionId={shareSessionId}
+          leafId={activeLeafId}
+          onClose={() => setShareSessionId(null)}
+        />
+      )}
+      {exportSessionId && (
+        <ExportSessionDialog
+          sessionId={exportSessionId}
+          leafId={activeLeafId}
+          onExported={(savedPath) => {
+            addNotice({ type: "success", message: t("export.savedTo", { path: savedPath }) });
+          }}
+          onClose={() => setExportSessionId(null)}
+        />
+      )}
+      {importDialogState.open && (
+        <ImportSessionDialog
+          initialPath={importDialogState.initialPath}
+          cwd={session?.cwd ?? newSessionCwd}
+          onClose={() => setImportDialogState({ open: false })}
+          onImported={(importedSessionId) => {
+            setImportDialogState({ open: false });
+            addNotice({ type: "success", message: t("import.importedNotice") });
+            onSessionForked?.(importedSessionId);
+          }}
+        />
+      )}
     </div>
   );
 }

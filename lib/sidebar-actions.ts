@@ -22,6 +22,8 @@ export type SessionMenuActionId =
   | "rename"
   | "generate-title"
   | "fork"
+  | "share"
+  | "export"
   | "mark-read"
   | "mark-unread"
   | "archive"
@@ -51,6 +53,8 @@ export function sessionMenuEntries(
       { kind: "action", id: "rename", shortcut: "R" },
       { kind: "action", id: "generate-title", shortcut: "G" },
       { kind: "action", id: "fork", shortcut: "F" },
+      { kind: "action", id: "share", shortcut: "S" },
+      { kind: "action", id: "export", shortcut: "E" },
       openNewTab,
       { kind: "separator" },
       { kind: "action", id: "delete", shortcut: "D" },
@@ -61,6 +65,8 @@ export function sessionMenuEntries(
     { kind: "action", id: "rename", shortcut: "R" },
     { kind: "action", id: "generate-title", shortcut: "G" },
     { kind: "action", id: "fork", shortcut: "F" },
+    { kind: "action", id: "share", shortcut: "S" },
+    { kind: "action", id: "export", shortcut: "E" },
     { kind: "action", id: status.unread ? "mark-read" : "mark-unread", shortcut: "U" },
     // A running family would come straight back: archiving waits for the run.
     status.running

@@ -32,19 +32,46 @@ export function folderDialogCommand(
   };
 }
 
+export function fileDialogCommand(
+  platform: string,
+  prompt: string,
+): { command: string; args: string[] } | null {
+  if (platform !== "darwin") return null;
+  return {
+    command: "osascript",
+    args: [
+      "-e", "on run argv",
+      "-e", "return POSIX path of (choose file with prompt (item 1 of argv))",
+      "-e", "end run",
+      prompt,
+    ],
+  };
+}
+
+export function saveFileDialogCommand(
+  platform: string,
+  prompt: string,
+  defaultName: string,
+): { command: string; args: string[] } | null {
+  if (platform !== "darwin") return null;
+  return {
+    command: "osascript",
+    args: [
+      "-e", "on run argv",
+      "-e", "return POSIX path of (choose file name with prompt (item 1 of argv) default name (item 2 of argv))",
+      "-e", "end run",
+      prompt,
+      defaultName,
+    ],
+  };
+}
+
 export type FolderDialogResult = { path: string } | { cancelled: true };
 
-/**
- * 弹出对话框，等用户选完。取消得 { cancelled: true }；命令起不来或异常退出则 reject，
- * 调用方回退到应用内选择器。signal 中止（浏览器断开）时把对话框关掉，免得留一个没人等的窗口。
- */
-export function pickFolderNatively(
-  prompt: string,
+function runOsascriptDialog(
+  spec: { command: string; args: string[] },
   signal: AbortSignal,
-  platform: string = process.platform,
 ): Promise<FolderDialogResult> {
-  const spec = folderDialogCommand(platform, prompt);
-  if (!spec) return Promise.reject(new Error(`Unsupported platform: ${platform}`));
   if (signal.aborted) return Promise.resolve({ cancelled: true });
 
   return new Promise((resolve, reject) => {
@@ -79,4 +106,39 @@ export function pickFolderNatively(
       reject(new Error(stderr.trim() || `${spec.command} exited with ${code}`));
     });
   });
+}
+
+/**
+ * 弹出对话框，等用户选完。取消得 { cancelled: true }；命令起不来或异常退出则 reject，
+ * 调用方回退到应用内选择器。signal 中止（浏览器断开）时把对话框关掉，免得留一个没人等的窗口。
+ */
+export function pickFolderNatively(
+  prompt: string,
+  signal: AbortSignal,
+  platform: string = process.platform,
+): Promise<FolderDialogResult> {
+  const spec = folderDialogCommand(platform, prompt);
+  if (!spec) return Promise.reject(new Error(`Unsupported platform: ${platform}`));
+  return runOsascriptDialog(spec, signal);
+}
+
+export function pickFileNatively(
+  prompt: string,
+  signal: AbortSignal,
+  platform: string = process.platform,
+): Promise<FolderDialogResult> {
+  const spec = fileDialogCommand(platform, prompt);
+  if (!spec) return Promise.reject(new Error(`Unsupported platform: ${platform}`));
+  return runOsascriptDialog(spec, signal);
+}
+
+export function pickSaveFileNatively(
+  prompt: string,
+  defaultName: string,
+  signal: AbortSignal,
+  platform: string = process.platform,
+): Promise<FolderDialogResult> {
+  const spec = saveFileDialogCommand(platform, prompt, defaultName);
+  if (!spec) return Promise.reject(new Error(`Unsupported platform: ${platform}`));
+  return runOsascriptDialog(spec, signal);
 }

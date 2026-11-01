@@ -312,8 +312,13 @@ const BUILTIN_SLASH_COMMANDS: BuiltinSlashCommand[] = [
   { name: "reload", description: "chat.commandReload", source: "builtin" },
   { name: "name", description: "chat.commandName", source: "builtin" },
   { name: "session", description: "chat.commandSession", source: "builtin", availableWhileStreaming: true },
+  { name: "context", description: "command.contextDescription", source: "builtin", availableWhileStreaming: true },
   { name: "copy", description: "chat.commandCopy", source: "builtin", availableWhileStreaming: true },
   { name: "clone", description: "chat.commandClone", source: "builtin" },
+  { name: "share", description: "chat.commandShare", source: "builtin", availableWhileStreaming: true },
+  { name: "export", description: "command.exportDescription", source: "builtin", availableWhileStreaming: true },
+  { name: "import", description: "chat.commandImport", source: "builtin" },
+  { name: "hotkeys", description: "chat.commandHotkeys", source: "builtin", availableWhileStreaming: true },
 ];
 
 function getBuiltinSlashCommand(message: string): BuiltinSlashCommand | undefined {

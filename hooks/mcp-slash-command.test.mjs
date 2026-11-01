@@ -219,3 +219,33 @@ test("without a way to open Settings, /mcp is sent", async () => {
   assert.deepEqual(await run("/mcp"), { handled: false });
   assert.deepEqual(calls.requests, []);
 });
+
+test("/hotkeys, /share, /export, /import, and /context dispatch their panel actions without notices", async () => {
+  const { run, scope, calls } = hook();
+  const opened = { hotkeys: 0, share: [], export: [], imports: [], statsTabs: [] };
+  scope.messagesRef = { current: [{ role: "user", content: "hi" }] };
+  scope.agentRunningRef = { current: false };
+  scope.bashRunningRef = { current: false };
+  scope.onHotkeysOpen = () => { opened.hotkeys += 1; };
+  scope.onShareSessionOpen = (sid) => { opened.share.push(sid); };
+  scope.onExportSessionOpen = (sid) => { opened.export.push(sid); };
+  scope.onImportSessionOpen = (path) => { opened.imports.push(path); };
+  scope.onSessionStatsPanelOpen = (tab) => { opened.statsTabs.push(tab); };
+
+  assert.deepEqual(await run("/hotkeys"), { handled: true, action: "openHotkeys" });
+  assert.equal(opened.hotkeys, 1);
+
+  assert.deepEqual(await run("/share"), { handled: true, action: "openShare" });
+  assert.deepEqual(opened.share, ["session-1"]);
+
+  assert.deepEqual(await run("/export"), { handled: true, action: "openExport" });
+  assert.deepEqual(opened.export, ["session-1"]);
+
+  assert.deepEqual(await run("/import"), { handled: true, action: "openImport" });
+  assert.deepEqual(await run('/import "/tmp/my file.jsonl"'), { handled: true, action: "openImport" });
+  assert.deepEqual(opened.imports, [undefined, "/tmp/my file.jsonl"]);
+
+  assert.deepEqual(await run("/context"), { handled: true, action: "openSessionStats" });
+  assert.deepEqual(opened.statsTabs, ["context"]);
+  assert.deepEqual(calls.notices, []);
+});

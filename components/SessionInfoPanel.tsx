@@ -1,18 +1,21 @@
 "use client";
 
-import { useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import type { ToolEntry } from "@/lib/tool-presets";
+import type { ContextUsageInfo, MessageContextSummary } from "@/lib/context-breakdown";
+import { ContextBreakdownPanel } from "./ContextBreakdownPanel";
 import { SystemPromptPanel } from "./SystemPromptPanel";
 import { ToolDefinitionsPanel } from "./ToolDefinitionsPanel";
 
 type Translate = (key: string, params?: Record<string, string | number>) => string;
 
-const TABS = ["overview", "system", "tools"] as const;
-type SessionInfoTab = (typeof TABS)[number];
+const TABS = ["overview", "context", "system", "tools"] as const;
+export type SessionInfoTab = (typeof TABS)[number];
 
 /** 后两页的名字沿用各自面板的标题，不另起一套说法。 */
 const TAB_LABEL_KEY: Record<SessionInfoTab, string> = {
   overview: "session.overview",
+  context: "context.tab",
   system: "system.prompt",
   tools: "tools.title",
 };
@@ -23,9 +26,12 @@ interface SessionInfoPanelProps {
   systemPrompt: string | null;
   tools: ToolEntry[] | null;
   systemInfoLoading: boolean;
-  /** 切到「系统提示词」「工具定义」页时调用：调用方向会话取一次此刻的，免得看到旧的。 */
+  /** 切到「上下文明细」「系统提示词」「工具定义」页时调用：调用方向会话取一次此刻的，免得看到旧的。 */
   onOpenSystemInfo: () => void;
   translate: Translate;
+  messageSummary?: MessageContextSummary | null;
+  contextUsage?: ContextUsageInfo | null;
+  initialTab?: SessionInfoTab;
 }
 
 /**
@@ -41,9 +47,21 @@ export function SessionInfoPanel({
   systemInfoLoading,
   onOpenSystemInfo,
   translate,
+  messageSummary,
+  contextUsage,
+  initialTab = "overview",
 }: SessionInfoPanelProps) {
-  const [tab, setTab] = useState<SessionInfoTab>("overview");
+  const [tab, setTab] = useState<SessionInfoTab>(initialTab);
   const tabRefs = useRef<Partial<Record<SessionInfoTab, HTMLButtonElement | null>>>({});
+  const onOpenSystemInfoRef = useRef(onOpenSystemInfo);
+  onOpenSystemInfoRef.current = onOpenSystemInfo;
+
+  useEffect(() => {
+    setTab(initialTab);
+    if (initialTab !== "overview") {
+      onOpenSystemInfoRef.current();
+    }
+  }, [initialTab]);
 
   const select = (next: SessionInfoTab) => {
     setTab(next);
@@ -89,6 +107,18 @@ export function SessionInfoPanel({
         {/* 另两页自带背景和下边线；概览是一块平铺的内容，边距和下边线在这里补。 */}
         {tab === "overview" && (
           <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--border)" }}>{children}</div>
+        )}
+        {tab === "context" && (
+          <div style={{ borderBottom: "1px solid var(--border)", maxHeight: "65vh", overflowY: "auto" }}>
+            <ContextBreakdownPanel
+              systemPrompt={systemPrompt}
+              tools={tools}
+              loading={systemInfoLoading}
+              messageSummary={messageSummary}
+              contextUsage={contextUsage}
+              onSelectTab={(nextTab) => select(nextTab)}
+            />
+          </div>
         )}
         {tab === "system" && (
           <SystemPromptPanel loading={systemInfoLoading} prompt={systemPrompt} translate={translate} />

@@ -15,8 +15,12 @@ import { TabBar, type Tab } from "./TabBar";
 import { openFileTab, saveFileViewerState, saveParkedFileViewerState, switchFileWorkspace, type ParkedFileWorkspace } from "./file-tab-state";
 import { SettingsPanel, SettingsSectionIcon } from "./SettingsPanel";
 import { ProjectTrustDialog, type ProjectTrustFailure } from "./ProjectTrustDialog";
+import { ImportSessionDialog } from "./ImportSessionDialog";
+import { ShareSessionDialog } from "./ShareSessionDialog";
+import { ExportSessionDialog } from "./ExportSessionDialog";
 import { BranchNavigator, hasSessionBranches } from "./BranchNavigator";
-import { SessionInfoPanel } from "./SessionInfoPanel";
+import { SessionInfoPanel, type SessionInfoTab } from "./SessionInfoPanel";
+import type { MessageContextSummary } from "@/lib/context-breakdown";
 import { AgentSessionPanel } from "./AgentSessionPanel";
 import { DebugPanel, DebugPanelBoundary } from "./DebugPanel";
 import { SubagentViewer } from "./SubagentViewer";
@@ -253,6 +257,9 @@ export function AppShell() {
   const [projectTrustDialogOpen, setProjectTrustDialogOpen] = useState(false);
   const [projectTrustBusy, setProjectTrustBusy] = useState(false);
   const [projectTrustError, setProjectTrustError] = useState<ProjectTrustFailure | null>(null);
+  const [topBarShareSessionOpen, setTopBarShareSessionOpen] = useState(false);
+  const [topBarExportSessionOpen, setTopBarExportSessionOpen] = useState(false);
+  const [topBarImportSessionOpen, setTopBarImportSessionOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(() => !initialNavigation.sidebarCollapsed);
   const desktopSidebarOpenRef = useRef(!initialNavigation.sidebarCollapsed);
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
@@ -421,6 +428,12 @@ export function AppShell() {
     setContextUsage(usage);
   }, []);
 
+  const [messageContextSummary, setMessageContextSummary] = useState<MessageContextSummary | null>(null);
+  const handleMessageContextSummaryChange = useCallback((summary: MessageContextSummary | null) => {
+    setMessageContextSummary(summary);
+  }, []);
+  const [sessionInfoInitialTab, setSessionInfoInitialTab] = useState<SessionInfoTab>("overview");
+
   // Single active panel — only one dropdown open at a time
   // 合并说明：系统提示词 / 工具定义已并入「会话信息」浮层（我们的顶栏整理），所以没有 "system" / "tools"；
   // "debug" 是上游新增的调试面板。
@@ -453,6 +466,7 @@ export function AppShell() {
     keepMobileToolbarOpen = false,
   ) => {
     if (isMobile) setSidebarOpen(false);
+    if (panel === "session") setSessionInfoInitialTab("overview");
     setActiveTopPanel((cur) => cur === panel ? null : panel);
     if (isMobile && isNarrowMobile && keepMobileToolbarOpen) setMobileToolbarMoreOpen(true);
   }, [isMobile, isNarrowMobile]);
@@ -488,9 +502,10 @@ export function AppShell() {
     });
   }, [systemInfoLoading]);
 
-  const openSessionStatsPanel = useCallback(() => {
+  const openSessionStatsPanel = useCallback((tab: SessionInfoTab = "overview") => {
     if (isMobile) setSidebarOpen(false);
     setMobileToolbarMoreOpen(false);
+    setSessionInfoInitialTab(tab);
     setActiveTopPanel("session");
   }, [isMobile]);
 
@@ -1473,6 +1488,7 @@ export function AppShell() {
         onBackgroundTaskDone={handleBackgroundTaskDone}
         onRunningSessionIdsChange={handleRunningSessionIdsChange}
         onSessionsChange={handleSessionsChange}
+        onSessionImported={handleSessionForked}
       />
       <div style={{ padding: "8px", flexShrink: 0, display: "flex", justifyContent: "space-between", gap: 4 }}>
         {([
@@ -2224,6 +2240,9 @@ export function AppShell() {
                   systemInfoLoading={systemInfoLoading}
                   onOpenSystemInfo={refreshSystemInfo}
                   translate={translate}
+                  messageSummary={messageContextSummary}
+                  contextUsage={contextUsage ?? sessionStats?.contextUsage ?? null}
+                  initialTab={sessionInfoInitialTab}
                 >
                   {sessionStats ? (() => {
                     const totalActiveMs = sessionStats.totalActiveMs ?? 0;
@@ -2363,6 +2382,78 @@ export function AppShell() {
                             </div>
                           ))}
                         </div>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
+                          {selectedSession && !selectedSession.transient && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setActiveTopPanel(null);
+                                setTopBarShareSessionOpen(true);
+                              }}
+                              style={{
+                                display: "inline-flex",
+                                alignItems: "center",
+                                gap: 6,
+                                padding: "4px 10px",
+                                borderRadius: 5,
+                                border: "1px solid var(--border)",
+                                background: "var(--bg-panel)",
+                                color: "var(--text)",
+                                fontSize: 11,
+                                fontFamily: "var(--font-ui)",
+                                cursor: "pointer",
+                              }}
+                            >
+                              {translate("share.dialogTitle")}
+                            </button>
+                          )}
+                          {selectedSession && !selectedSession.transient && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setActiveTopPanel(null);
+                                setTopBarExportSessionOpen(true);
+                              }}
+                              style={{
+                                display: "inline-flex",
+                                alignItems: "center",
+                                gap: 6,
+                                padding: "4px 10px",
+                                borderRadius: 5,
+                                border: "1px solid var(--border)",
+                                background: "var(--bg-panel)",
+                                color: "var(--text)",
+                                fontSize: 11,
+                                fontFamily: "var(--font-ui)",
+                                cursor: "pointer",
+                              }}
+                            >
+                              {translate("export.dialogTitle")}
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setActiveTopPanel(null);
+                              setTopBarImportSessionOpen(true);
+                            }}
+                            style={{
+                              display: "inline-flex",
+                              alignItems: "center",
+                              gap: 6,
+                              padding: "4px 10px",
+                              borderRadius: 5,
+                              border: "1px solid var(--border)",
+                              background: "var(--bg-panel)",
+                              color: "var(--text)",
+                              fontSize: 11,
+                              fontFamily: "var(--font-ui)",
+                              cursor: "pointer",
+                            }}
+                          >
+                            {translate("import.dialogTitle")}
+                          </button>
+                        </div>
                       </div>
                     );
                     const projectInfoSection = projectRows.length > 0 ? (
@@ -2406,8 +2497,32 @@ export function AppShell() {
                       </div>
                     );
                   })() : (
-                    <div style={{ fontSize: 12, color: "var(--text-muted)", fontStyle: "italic" }}>
-                       {translate("session.load")}
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+                      <div style={{ fontSize: 12, color: "var(--text-muted)", fontStyle: "italic" }}>
+                        {translate("session.load")}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setActiveTopPanel(null);
+                          setTopBarImportSessionOpen(true);
+                        }}
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 6,
+                          padding: "4px 10px",
+                          borderRadius: 5,
+                          border: "1px solid var(--border)",
+                          background: "var(--bg-panel)",
+                          color: "var(--text)",
+                          fontSize: 11,
+                          fontFamily: "var(--font-ui)",
+                          cursor: "pointer",
+                        }}
+                      >
+                        {translate("import.dialogTitle")}
+                      </button>
                     </div>
                   )}
                 </SessionInfoPanel>
@@ -2466,6 +2581,7 @@ export function AppShell() {
               onDebugSnapshotReaderChange={handleDebugSnapshotReaderChange}
               onSessionStatsChange={handleSessionStatsChange}
               onSessionStatsPanelOpen={openSessionStatsPanel}
+              onMessageContextSummaryChange={handleMessageContextSummaryChange}
               onOpenSettings={openSettingsSection}
               onContextUsageChange={handleContextUsageChange}
               onOpenFile={handleOpenLinkedFile}
@@ -2692,6 +2808,30 @@ export function AppShell() {
         }}
         onConfirm={() => void handleTrustProject()}
         onStatus={setProjectTrust}
+      />
+    )}
+    {topBarShareSessionOpen && selectedSession && !selectedSession.transient && (
+      <ShareSessionDialog
+        sessionId={selectedSession.id}
+        leafId={branchActiveLeafId}
+        onClose={() => setTopBarShareSessionOpen(false)}
+      />
+    )}
+    {topBarExportSessionOpen && selectedSession && !selectedSession.transient && (
+      <ExportSessionDialog
+        sessionId={selectedSession.id}
+        leafId={branchActiveLeafId}
+        onClose={() => setTopBarExportSessionOpen(false)}
+      />
+    )}
+    {topBarImportSessionOpen && (
+      <ImportSessionDialog
+        cwd={selectedSession?.cwd ?? newSessionCwd}
+        onImported={(importedSessionId) => {
+          setTopBarImportSessionOpen(false);
+          handleSessionForked(importedSessionId);
+        }}
+        onClose={() => setTopBarImportSessionOpen(false)}
       />
     )}
     </>

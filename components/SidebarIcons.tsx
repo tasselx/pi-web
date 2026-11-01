@@ -122,6 +122,29 @@ export function ForkIcon(props: SidebarIconProps) {
   );
 }
 
+/** Connected share nodes: a session row's "Share…". */
+export function ShareIcon(props: SidebarIconProps) {
+  return (
+    <SidebarIcon {...props}>
+      <circle cx="18" cy="5" r="3" />
+      <circle cx="6" cy="12" r="3" />
+      <circle cx="18" cy="19" r="3" />
+      <path d="m8.6 13.5 6.8 4M15.4 6.5l-6.8 4" />
+    </SidebarIcon>
+  );
+}
+
+/** Downward arrow into a tray: a session row's "Export…". */
+export function DownloadIcon(props: SidebarIconProps) {
+  return (
+    <SidebarIcon {...props}>
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <polyline points="7 10 12 15 17 10" />
+      <line x1="12" y1="15" x2="12" y2="3" />
+    </SidebarIcon>
+  );
+}
+
 /** An arrow leaving a box: a session row's "Open in new tab" (a browser tab, not a copy). */
 export function OpenInNewTabIcon(props: SidebarIconProps) {
   return (

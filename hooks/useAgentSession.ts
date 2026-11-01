@@ -199,7 +199,12 @@ export interface SlashCommandInfo {
 
 export type BuiltinSlashCommandResult =
   | { handled: false }
-  | { handled: true; message?: string; error?: string; action?: "openSessionStats" | "openSettings" | "compact" };
+  | {
+      handled: true;
+      message?: string;
+      error?: string;
+      action?: "openSessionStats" | "openSettings" | "compact" | "openHotkeys" | "openShare" | "openExport" | "openImport";
+    };
 
 /** How a run ended, for the completion sound and notifications. */
 export interface AgentEndInfo {
@@ -233,9 +238,13 @@ export interface UseAgentSessionOptions {
   onSystemInfoLoaderChange?: (loader: (() => Promise<void>) | null) => void;
   /** Registers the debug panel's reader of this page's stream and lease: it reads refs only, never a request. */
   onDebugSnapshotReaderChange?: (reader: (() => DebugClientSession) | null) => void;
-  onSessionStatsPanelOpen?: () => void;
+  onSessionStatsPanelOpen?: (tab?: "overview" | "context" | "system" | "tools") => void;
   /** Opens Settings on a section; a bare `/mcp` the built-in MCP extension owns opens Settings › MCP. */
   onOpenSettings?: (section: SettingsSection) => void;
+  onHotkeysOpen?: () => void;
+  onShareSessionOpen?: (sessionId: string) => void;
+  onExportSessionOpen?: (sessionId: string) => void;
+  onImportSessionOpen?: (initialPath?: string) => void;
   setToolPreset?: (preset: ToolPreset) => void;
   deferInitialScroll?: boolean;
   /** A fresh composer's model and reasoning picks to start with: the composer it replaces had them. */
@@ -418,7 +427,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
     session, newSessionCwd, newSessionDraftKey, onAgentEnd, onToolEnd, onAttentionNeeded, onSessionCreated, onSessionForked,
     modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSystemToolsChange, onSystemInfoLoaderChange, onSessionStatsPanelOpen,
-    onOpenSettings, onDebugSnapshotReaderChange,
+    onOpenSettings, onHotkeysOpen, onShareSessionOpen, onExportSessionOpen, onImportSessionOpen, onDebugSnapshotReaderChange,
   } = opts;
 
   const isNew = session === null && newSessionCwd !== null;
@@ -2546,7 +2555,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
     const [, commandName, rawArgs = ""] = match;
     const args = rawArgs.trim();
-    const sid = sessionIdRef.current ?? await ensureNewSession();
+    const sid =
+      sessionIdRef.current
+      ?? (commandName === "hotkeys" || commandName === "import" || commandName === "share" || commandName === "export" || commandName === "context"
+        ? null
+        : await ensureNewSession());
     const complete = (result: BuiltinSlashCommandResult): BuiltinSlashCommandResult => {
       if (!result.handled) return result;
       if (result.error) {
@@ -2621,7 +2634,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (stats) {
             setSessionStatsOverride(stats);
           }
-          onSessionStatsPanelOpen?.();
+          onSessionStatsPanelOpen?.("overview");
+          return complete({ handled: true, action: "openSessionStats" });
+        }
+
+        case "context": {
+          onSessionStatsPanelOpen?.("context");
           return complete({ handled: true, action: "openSessionStats" });
         }
 
@@ -2665,13 +2683,55 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           return completed;
         }
 
+        case "share": {
+          if (!sid || (messagesRef?.current && messagesRef.current.length === 0)) {
+            return complete({ handled: true, error: "No active session to share" });
+          }
+          onShareSessionOpen?.(sid);
+          return complete({ handled: true, action: "openShare" });
+        }
+
+        case "export": {
+          if (!sid || (messagesRef?.current && messagesRef.current.length === 0)) {
+            return complete({ handled: true, error: "No active session to export" });
+          }
+          onExportSessionOpen?.(sid);
+          return complete({ handled: true, action: "openExport" });
+        }
+
+        case "import": {
+          if (agentRunningRef?.current || bashRunningRef?.current) {
+            return complete({ handled: true, error: "Cannot import while the session is running" });
+          }
+          let importPath: string | undefined;
+          if (args) {
+            const firstChar = args[0];
+            if (firstChar === '"' || firstChar === "'") {
+              const closing = args.indexOf(firstChar, 1);
+              if (closing < 0) return complete({ handled: true, error: "Usage: /import <path.jsonl>" });
+              importPath = args.slice(1, closing).trim();
+              if (!importPath) return complete({ handled: true, error: "Usage: /import <path.jsonl>" });
+            } else {
+              const ws = args.search(/\s/);
+              importPath = ws < 0 ? args : args.slice(0, ws);
+            }
+          }
+          onImportSessionOpen?.(importPath);
+          return complete({ handled: true, action: "openImport" });
+        }
+
+        case "hotkeys": {
+          onHotkeysOpen?.();
+          return complete({ handled: true, action: "openHotkeys" });
+        }
+
         default:
           return { handled: false };
       }
     } catch (e) {
       return complete({ handled: true, error: e instanceof Error ? e.message : String(e) });
     }
-  }, [activeLeafId, addNotice, ensureNewSession, handleCompact, isCompacting, loadModels, loadSession, loadSlashCommands, loadTools, promoteNewSession, onOpenSettings, onSessionForked, onSessionStatsPanelOpen, opts.chatInputRef, slashCommandsForMcp]);
+  }, [activeLeafId, addNotice, ensureNewSession, handleCompact, isCompacting, loadModels, loadSession, loadSlashCommands, loadTools, promoteNewSession, onExportSessionOpen, onHotkeysOpen, onImportSessionOpen, onOpenSettings, onSessionForked, onSessionStatsPanelOpen, onShareSessionOpen, opts.chatInputRef, slashCommandsForMcp]);
 
   // Let AgentSession.prompt decide atomically whether to queue against the
   // current run or start a new turn if it settled while the request was in

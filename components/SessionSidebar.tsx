@@ -89,11 +89,14 @@ import { useSessionUiState } from "@/hooks/useSessionUiState";
 import { archiveViewState, filesFoldState, useSidebarMotion } from "@/hooks/useSidebarMotion";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { DismissButton } from "./DismissButton";
+import { ExportSessionDialog } from "./ExportSessionDialog";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
+import { ImportSessionDialog } from "./ImportSessionDialog";
 import { PiWebTitle } from "./PiWebTitle";
 import { ProjectWorktreePicker, type ProjectWorktreePickerHandle, type WorktreeRemoval } from "./ProjectWorktreePicker";
 import { SessionSearch } from "./SessionSearch";
 import { SessionTree, sessionRowTitle, type SessionTreeReveal } from "./SessionTree";
+import { ShareSessionDialog } from "./ShareSessionDialog";
 import { SidebarMenu, type SidebarMenuAnchor, type SidebarMenuItem } from "./SidebarMenu";
 import { SidebarToast, type SidebarToastAction, type SidebarToastData } from "./SidebarToast";
 import {
@@ -103,6 +106,7 @@ import {
   ChevronIcon,
   DotIcon,
   DotOutlineIcon,
+  DownloadIcon,
   EyeIcon,
   FolderIcon,
   MessageIcon,
@@ -116,6 +120,7 @@ import {
   RefreshIcon,
   RestoreIcon,
   SearchIcon,
+  ShareIcon,
   SpinnerIcon,
   TerminalIcon,
   TrashIcon,
@@ -237,6 +242,7 @@ interface Props {
   onBackgroundTaskDone?: () => void;
   onRunningSessionIdsChange?: (ids: Set<string>) => void;
   onSessionsChange?: (sessions: SessionInfo[]) => void;
+  onSessionImported?: (sessionId: string) => void;
 }
 
 /**
@@ -339,6 +345,8 @@ const SESSION_ACTION_LABEL_KEYS: Record<SessionMenuActionId, string> = {
   rename: "sidebar.rename",
   "generate-title": "title.generate",
   fork: "sidebar.fork",
+  share: "sidebar.share",
+  export: "sidebar.export",
   "mark-read": "sidebar.markRead",
   "mark-unread": "sidebar.markUnread",
   archive: "sidebar.archive",
@@ -354,6 +362,8 @@ function sessionActionIcon(id: SessionMenuActionId): ReactNode {
     case "rename": return <PencilIcon />;
     case "generate-title": return <WandIcon />;
     case "fork": return <ForkIcon />;
+    case "share": return <ShareIcon />;
+    case "export": return <DownloadIcon />;
     case "mark-read": return <DotOutlineIcon />;
     case "mark-unread": return <DotIcon />;
     case "archive": return <ArchiveIcon />;
@@ -529,7 +539,7 @@ function buttonAnchor(element: HTMLElement, align: "start" | "end"): SidebarMenu
   return { kind: "rect", rect: { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }, align };
 }
 
-export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, controlRef, onNewSessionContextChange, initialSessionId, initialSessionLinked, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, onOpenTerminal, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onBackgroundTaskDone, onRunningSessionIdsChange, onSessionsChange }: Props) {
+export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, controlRef, onNewSessionContextChange, initialSessionId, initialSessionLinked, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, onOpenTerminal, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onBackgroundTaskDone, onRunningSessionIdsChange, onSessionsChange, onSessionImported }: Props) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
@@ -566,6 +576,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [fileSearchOpen, setFileSearchOpen] = useState(false);
   const [sessionSearchOpen, setSessionSearchOpen] = useState(false);
   const [sessionSearchQuery, setSessionSearchQuery] = useState("");
+  const [sharingSession, setSharingSession] = useState<SessionInfo | null>(null);
+  const [exportingSession, setExportingSession] = useState<SessionInfo | null>(null);
+  const [importDialogCwd, setImportDialogCwd] = useState<string | null>(null);
   const [changesCount, setChangesCount] = useState(0);
   const [changesCollapsed, setChangesCollapsed] = useState(true);
   const [showIgnoredFiles, setShowIgnoredFiles] = useState(false);
@@ -2128,6 +2141,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       case "rename": startRename(family); break;
       case "generate-title": void generateTitle(row); break;
       case "fork": void forkFamily(row); break;
+      case "share": setSharingSession(family.root); break;
+      case "export": setExportingSession(family.root); break;
       case "mark-read": markFamilyRead(family, true); break;
       case "mark-unread": markFamilyRead(family, false); break;
       case "archive": archiveFamily(family); break;
@@ -2585,6 +2600,13 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       { type: "separator", id: "separator-sessions" },
       {
         type: "item",
+        id: "import-session",
+        label: t("sidebar.importSession"),
+        icon: <UploadIcon />,
+        onSelect: () => setImportDialogCwd(project.root),
+      },
+      {
+        type: "item",
         id: "archive-older",
         label: t("sidebar.archiveOlderThanWeek", { count: olderCount }),
         icon: <ArchiveIcon />,
@@ -3022,6 +3044,33 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           error={customPathError}
           onCancel={() => closeFolderPicker(customPathOpen)}
           onSelect={(path) => void commitCustomPath(path)}
+        />
+      )}
+      {sharingSession && (
+        <ShareSessionDialog
+          sessionId={sharingSession.id}
+          onClose={() => setSharingSession(null)}
+        />
+      )}
+      {exportingSession && (
+        <ExportSessionDialog
+          sessionId={exportingSession.id}
+          onExported={(savedPath) => {
+            showToast(t("export.savedTo", { path: savedPath }));
+          }}
+          onClose={() => setExportingSession(null)}
+        />
+      )}
+      {importDialogCwd !== null && (
+        <ImportSessionDialog
+          cwd={importDialogCwd}
+          onImported={(importedSessionId) => {
+            setImportDialogCwd(null);
+            showToast(t("import.importedNotice"));
+            void loadSessions();
+            onSessionImported?.(importedSessionId);
+          }}
+          onClose={() => setImportDialogCwd(null)}
         />
       )}
       {/* One toolbar row, in the cells of the chat's top bar beside it (its

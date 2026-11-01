@@ -27,6 +27,7 @@ import {
   isThinkingExpandedByDefault,
   setThinkingExpandedByDefault,
 } from "@/lib/thinking-expansion-preference";
+import { HotkeysSectionsList } from "./HotkeysDialog";
 import { ModelsConfig } from "./ModelsConfig";
 import { getNotificationState, type NotificationState } from "@/lib/browser-notifications";
 import { hasPushRegistration, setupPushSubscription } from "@/lib/push-client";
@@ -495,6 +496,13 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
         </div>
         <p id="settings-cache-miss-notices-description" className="settings-general-description">{t("settings.cacheMissNoticesDescription")}</p>
         {cacheMissNoticesError && <p role="alert" className="settings-general-error">{cacheMissNoticesError}</p>}
+      </section>
+
+      <section className="settings-general-section">
+        <h3 className="settings-general-heading">{t("hotkeys.dialogTitle")}</h3>
+        <div style={{ maxWidth: 420, marginTop: 8 }}>
+          <HotkeysSectionsList enterSendMode={enterSendMode} idPrefix="settings-hotkeys-section" />
+        </div>
       </section>
 
       <section className="settings-general-section">

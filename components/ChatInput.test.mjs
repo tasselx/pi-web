@@ -669,6 +669,10 @@ test("locks built-in command submission until it settles", async () => {
 test("keeps only read-only built-ins available while a run is active", () => {
   assert.equal(canRunBuiltinSlashCommandWhileStreaming("/copy"), true);
   assert.equal(canRunBuiltinSlashCommandWhileStreaming("/session"), true);
+  assert.equal(canRunBuiltinSlashCommandWhileStreaming("/context"), true);
+  assert.equal(canRunBuiltinSlashCommandWhileStreaming("/share"), true);
+  assert.equal(canRunBuiltinSlashCommandWhileStreaming("/hotkeys"), true);
+  assert.equal(canRunBuiltinSlashCommandWhileStreaming("/import"), false);
   assert.equal(canRunBuiltinSlashCommandWhileStreaming("/compact"), false);
   assert.equal(canRunBuiltinSlashCommandWhileStreaming("/auto-compact"), false);
   assert.equal(canRunBuiltinSlashCommandWhileStreaming("/reload"), false);

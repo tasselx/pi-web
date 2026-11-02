@@ -1047,3 +1047,22 @@ test("grows the composer to its text and hides the scrollbar until the text is t
   assert.equal(tall.style.height, "200px", "the box caps at 200 px");
   assert.equal(tall.style.overflowY, "auto", "capped text scrolls");
 });
+
+test("scrolls to bottom when typing or breaking at the end of capped text", () => {
+  const fake = (value, scrollHeight, clientHeight, selectionEnd = value.length, scrollTop = 0) => ({
+    value,
+    style: { height: "", overflowY: "" },
+    get scrollHeight() { return scrollHeight; },
+    clientHeight,
+    selectionEnd,
+    scrollTop,
+  });
+
+  const atBottom = fake("lots\nmore", 320, 200, 9, 20);
+  autoGrowTextarea(atBottom);
+  assert.equal(atBottom.scrollTop, 320, "follows the cursor at the end to the bottom");
+
+  const inMiddle = fake("lots\nmore", 320, 200, 2, 20);
+  autoGrowTextarea(inMiddle);
+  assert.equal(inMiddle.scrollTop, 20, "preserves scroll position when editing in the middle");
+});

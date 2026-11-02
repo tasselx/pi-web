@@ -221,9 +221,17 @@ export function replaceLinksWithMarkdown(
  * overflows the box stays cut off instead of showing a scrollbar.
  */
 export function autoGrowTextarea(ta: HTMLTextAreaElement): void {
+  const previousScrollTop = ta.scrollTop ?? 0;
+  const selectionEnd = typeof ta.selectionEnd === "number" ? ta.selectionEnd : ta.value.length;
+  const isAtBottom =
+    selectionEnd >= ta.value.length ||
+    (ta.scrollHeight > ta.clientHeight && previousScrollTop + ta.clientHeight >= ta.scrollHeight - 4);
+
   ta.style.height = "auto";
   ta.style.height = `${ta.value ? Math.min(ta.scrollHeight, 200) : ta.clientHeight}px`;
   ta.style.overflowY = ta.value && ta.scrollHeight > ta.clientHeight ? "auto" : "hidden";
+
+  ta.scrollTop = isAtBottom ? ta.scrollHeight : previousScrollTop;
 }
 
 function getVisibleTopBoundary(element: HTMLElement): number {
@@ -1054,9 +1062,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const resizeTextarea = useCallback(() => {
     const ta = textareaRef.current;
     if (!ta) return;
-    ta.style.height = "auto";
-    if (ta.value) autoGrowTextarea(ta);
-    else ta.style.overflowY = "hidden";
+    if (ta.value) {
+      autoGrowTextarea(ta);
+    } else {
+      ta.style.height = "auto";
+      ta.style.overflowY = "hidden";
+    }
   }, []);
 
   useLayoutEffect(resizeTextarea, [value, fontSize, uiFontFamily, uiWeight, resizeTextarea]);

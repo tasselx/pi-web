@@ -98,6 +98,17 @@ export interface SkillUpdateResult {
   message?: string;
 }
 
+/** How Remove takes a skill out: delete its files, or `npx skills remove` for one the skills CLI installed. */
+export type SkillRemovalMethod = "files" | "cli";
+
+export interface SkillRemovalInfo {
+  method: SkillRemovalMethod;
+  /** What goes: the skill's folder, or its file when the skill is a single `.md`. */
+  path: string;
+  /** Which skill folders it lives in; the project ones need the project's trust. */
+  scope: SkillInstallScope;
+}
+
 export interface SkillInfo {
   name: string;
   description: string;
@@ -109,6 +120,22 @@ export interface SkillInfo {
     scope?: string;
   };
   install?: SkillInstallInfo;
+  /** Absent when the skill is not in one of pi's skill folders (a plugin's, or a path in settings): it cannot be removed here. */
+  removal?: SkillRemovalInfo;
+}
+
+/** `POST /api/skills/remove` `remove`: all the panel needs to offer Undo; the token is the only handle. */
+export interface SkillRemoveResponse {
+  token: string;
+  name: string;
+  /** Time left to undo, so the browser's own clock does not matter. */
+  expiresInMs: number;
+}
+
+/** `POST /api/skills/remove` `undo`: the skill file that lists again. */
+export interface SkillRestoreResponse {
+  filePath: string;
+  name: string;
 }
 
 export interface SkillsResponse {

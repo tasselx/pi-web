@@ -47,9 +47,30 @@ function readSkillLock(path: string): Record<string, SkillLockEntry> {
   }
 }
 
-function isWithin(path: string, root: string): boolean {
+/** `path` 严格位于 `root` 之内（root 自己不算）。移除技能时靠它保证绝不会删到技能目录本身。 */
+export function isWithin(path: string, root: string): boolean {
   const rel = relative(resolve(root), resolve(path));
   return rel !== "" && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+}
+
+/**
+ * pi 读取技能的目录，按范围分开。skills CLI 到 1.5.x 装进 pi 自己的目录，
+ * 1.7 起装进通用的 .agents/skills，pi 两处都读。标注安装信息与移除技能共用这一份，
+ * 免得其中一处改了目录而另一处悄悄对不上。
+ */
+export function getSkillRoots({
+  cwd,
+  agentDir,
+  homeDir = homedir(),
+}: {
+  cwd: string;
+  agentDir: string;
+  homeDir?: string;
+}): Record<SkillInstallScope, string[]> {
+  return {
+    global: [join(agentDir, "skills"), join(homeDir, ".agents", "skills")],
+    project: [join(cwd, ".pi", "skills"), join(cwd, ".agents", "skills")],
+  };
 }
 
 function findLockEntry(
@@ -131,18 +152,15 @@ export function annotateSkillsWithInstallInfo(
 ): SkillInfo[] {
   const globalEntries = readSkillLock(globalLockPath);
   const projectEntries = readSkillLock(projectLockPath);
-  // The skills CLI installs for pi into its own dirs up to 1.5.x and into the
-  // Agent Skills dirs (.agents/skills) since 1.7; pi loads both.
-  const globalSkillsRoots = [join(agentDir, "skills"), join(homeDir, ".agents", "skills")];
-  const projectSkillsRoots = [join(cwd, ".pi", "skills"), join(cwd, ".agents", "skills")];
+  const skillRoots = getSkillRoots({ cwd, agentDir, homeDir });
   const isWithinAny = (path: string, roots: string[]) => roots.some((root) => isWithin(path, root));
 
   return skills.map((skill) => {
     if (!existsSync(skill.filePath)) return skill;
 
-    const install = isWithinAny(skill.filePath, globalSkillsRoots)
+    const install = isWithinAny(skill.filePath, skillRoots.global)
       ? getInstallInfo(globalEntries, skill.name, "global")
-      : isWithinAny(skill.filePath, projectSkillsRoots)
+      : isWithinAny(skill.filePath, skillRoots.project)
         ? getInstallInfo(projectEntries, skill.name, "project")
         : undefined;
 

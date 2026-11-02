@@ -1037,6 +1037,27 @@
   text-align: right;
 }
 
+/* 移除前的确认：就在「移除」按钮下面，说清会删什么、能否撤销 */
+.skill-remove-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-panel);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.skill-remove-confirm-text {
+  flex: 1 1 240px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .skill-source-link {
   display: flex;
   align-items: center;

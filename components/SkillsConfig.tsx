@@ -1,11 +1,13 @@
 "use client";
 
-import { useState, useEffect, useCallback, useLayoutEffect, useRef } from "react";
+import { useState, useEffect, useCallback, useId, useLayoutEffect, useRef } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import type {
   SkillContentResponse,
   SkillInfo as Skill,
   SkillInstallScope,
+  SkillRemoveResponse,
+  SkillRestoreResponse,
   SkillSearchResult,
   SkillsResponse,
   SkillToggleResult,
@@ -18,6 +20,7 @@ import {
   getLastSettingsSelection,
   setLastSettingsSelection,
 } from "@/lib/settings-navigation";
+import { focusIfLost } from "@/lib/stacked-dialog";
 import {
   ConfigAddSourceHeading,
   ConfigButton,
@@ -30,6 +33,7 @@ import {
   ConfigField,
   ConfigFooter,
   ConfigListAction,
+  ConfigNotice,
   ConfigPanelShell,
   ConfigSaveTarget,
   ConfigScopeTag,
@@ -133,6 +137,8 @@ function SkillDetail({
   onToggle,
   toggling,
   saveError,
+  removing,
+  onRemove,
   updateStatus,
   checkingUpdate,
   updating,
@@ -145,6 +151,10 @@ function SkillDetail({
   onToggle: (skill: Skill) => void;
   toggling: boolean;
   saveError: string | null;
+  /** A removal is on its way somewhere in the panel. */
+  removing: boolean;
+  /** Removes the skill; answers the failure to show, or null (the panel then reloads and this pane goes). */
+  onRemove: (skill: Skill) => Promise<string | null>;
   updateStatus?: SkillUpdateResult;
   checkingUpdate: boolean;
   updating: boolean;
@@ -155,6 +165,20 @@ function SkillDetail({
   const { t } = useI18n();
   const label = sourceLabel(skill);
   const enabled = !skill.disableModelInvocation;
+  const displayPath = (path: string) => (label === "project" ? displayPathWithin(path, cwd) : shortenPath(path));
+  const { removal } = skill;
+  // 确认放在本窗格里（切换技能时随窗格一起重置）；服务端算不出移除方式的技能（插件、settings 里的路径）没有 removal
+  const [confirmingRemove, setConfirmingRemove] = useState(false);
+  const [removeError, setRemoveError] = useState<string | null>(null);
+  const removeNoteId = useId();
+  // 目录遵循通用的 .agents/skills 约定时，别的工具（Cursor、Claude Code……）可能也在读它
+  const sharedFolder = /[\\/]\.agents[\\/]skills[\\/]/.test(skill.filePath);
+  const confirmRemove = async () => {
+    setRemoveError(null);
+    const failure = await onRemove(skill);
+    // 成功时面板会重新加载列表，本窗格随之卸载；只有失败才留在这里
+    if (failure) setRemoveError(failure);
+  };
   const [instructions, setInstructions] = useState<string | null>(null);
   const [instructionsError, setInstructionsError] = useState<string | null>(null);
   // Documents opened from the instructions' links; the last one shows.
@@ -215,10 +239,22 @@ function SkillDetail({
           <ConfigDetailHeaderInfo>
             <ConfigScopeTag scope={label}>{scopeLabel(label, t)}</ConfigScopeTag>
             <span className="config-detail-path">
-              {label === "project" ? displayPathWithin(skill.filePath, cwd) : shortenPath(skill.filePath)}
+              {displayPath(skill.filePath)}
             </span>
           </ConfigDetailHeaderInfo>
           <ConfigDetailActions>
+            <ConfigButton
+              variant="danger"
+              size="small"
+              disabled={!removal || removing || confirmingRemove}
+              aria-describedby={removal ? undefined : removeNoteId}
+              onClick={() => {
+                setRemoveError(null);
+                setConfirmingRemove(true);
+              }}
+            >
+              {t("i18n.remove")}
+            </ConfigButton>
             <ConfigSwitch
               checked={enabled}
               loading={toggling}
@@ -238,7 +274,30 @@ function SkillDetail({
               {saveError}
             </span>
           )}
+          {removeError && (
+            <span role="alert" style={{ fontSize: 12, color: "#f87171", overflowWrap: "anywhere" }}>
+              {removeError}
+            </span>
+          )}
         </div>
+        {/* 不能移除的原因写成可见文字，不只放在提示气泡里 */}
+        {!removal && <div id={removeNoteId} className="config-detail-heading-note">{t("skills.removeUnavailable")}</div>}
+        {confirmingRemove && removal && (
+          <div className="skill-remove-confirm">
+            <span className="skill-remove-confirm-text">
+              {removal.method === "cli"
+                ? t("skills.removeConfirmCli", { name: skill.name, path: displayPath(removal.path) })
+                : t("skills.removeConfirmFiles", { path: displayPath(removal.path) })}
+              {sharedFolder && <> {t("skills.removeConfirmShared")}</>}
+            </span>
+            <ConfigButton size="small" onClick={() => setConfirmingRemove(false)} disabled={removing}>
+              {t("i18n.cancel")}
+            </ConfigButton>
+            <ConfigButton variant="danger" size="small" onClick={() => void confirmRemove()} disabled={removing}>
+              {removing ? t("i18n.removing") : t("i18n.remove")}
+            </ConfigButton>
+          </div>
+        )}
       </div>
 
       {skill.install?.skillsShUrl && (
@@ -652,6 +711,17 @@ export function SkillsConfig({
   const [updatingSkill, setUpdatingSkill] = useState<string | null>(null);
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [projectResourcesLoaded, setProjectResourcesLoaded] = useState(true);
+  // 一次只做一个移除；失败的原因由详情页自己显示
+  const [removing, setRemoving] = useState(false);
+  // 刚移除的那个技能：服务端留着它 60 秒，浏览器只拿到令牌，撤销靠它
+  const [removed, setRemoved] = useState<{
+    token: string;
+    name: string;
+    expiresInMs: number;
+    undoing: boolean;
+    error: string | null;
+  } | null>(null);
+  const undoButtonRef = useRef<HTMLButtonElement>(null);
 
   const loadSkills = useCallback(async () => {
     setLoading(true);
@@ -824,6 +894,73 @@ export function SkillsConfig({
     }
   }, []);
 
+  const removeSkill = useCallback(async (skill: Skill): Promise<string | null> => {
+    setRemoving(true);
+    try {
+      const res = await fetch("/api/skills/remove", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "remove", cwd, filePath: skill.filePath }),
+      });
+      const d = (await res.json()) as Partial<SkillRemoveResponse> & { error?: string };
+      if (!res.ok || d.error || !d.token) return d.error ?? `HTTP ${res.status}`;
+      setRemoved({
+        token: d.token,
+        name: d.name ?? skill.name,
+        expiresInMs: d.expiresInMs ?? 0,
+        undoing: false,
+        error: null,
+      });
+      await loadSkills();
+      // 点「移除」的按钮随详情窗格一起没了，焦点掉到页面上；交给撤销按钮，键盘用户才接得上
+      focusIfLost(document, undoButtonRef.current);
+      return null;
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    } finally {
+      setRemoving(false);
+    }
+  }, [cwd, loadSkills]);
+
+  const undoRemoval = useCallback(async () => {
+    if (!removed) return;
+    const { token } = removed;
+    // 只改这一个令牌的通知：撤销途中若又移除了别的技能，通知已换成新的，不能被这次的结果覆盖
+    const update = (patch: { undoing: boolean; error: string | null } | null) =>
+      setRemoved((current) => {
+        if (current?.token !== token) return current;
+        return patch && { ...current, ...patch };
+      });
+    update({ undoing: true, error: null });
+    try {
+      const res = await fetch("/api/skills/remove", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "undo", token }),
+      });
+      const d = (await res.json()) as Partial<SkillRestoreResponse> & { error?: string };
+      if (!res.ok || d.error || !d.filePath) throw new Error(d.error ?? `HTTP ${res.status}`);
+      update(null);
+      await loadSkills();
+      setSelected(d.filePath);
+      setAddMode(false);
+    } catch (e) {
+      update({ undoing: false, error: e instanceof Error ? e.message : String(e) });
+    }
+  }, [removed, loadSkills]);
+
+  // 通知在服务端放手撤销的那一刻收起
+  const removedToken = removed?.token;
+  const removedExpiresInMs = removed?.expiresInMs;
+  useEffect(() => {
+    if (removedToken === undefined || removedExpiresInMs === undefined) return;
+    const timer = setTimeout(
+      () => setRemoved((current) => (current?.token === removedToken ? null : current)),
+      removedExpiresInMs,
+    );
+    return () => clearTimeout(timer);
+  }, [removedToken, removedExpiresInMs]);
+
   // One PATCH for the whole group: each file is edited on its own and
   // reported separately, so the skills the route refuses keep their state and
   // are named under the group heading while the rest switch.
@@ -870,12 +1007,24 @@ export function SkillsConfig({
   }, [t]);
 
   const selectedSkill = skills.find((s) => s.filePath === selected) ?? null;
-  const bulkBusy = loading || toggling.size > 0 || updatingSkill !== null;
+  const bulkBusy = loading || toggling.size > 0 || updatingSkill !== null || removing;
 
   return (
     <ConfigPanelShell embedded={embedded} title={t("common.skills")} subtitle={shortenPath(cwd)} closeLabel={t("i18n.close")} onClose={onClose}>
 
         {!projectResourcesLoaded && <ConfigTrustNotice message={t("trust.skillsNotLoaded")} />}
+        {removed && (
+          <ConfigNotice
+            action={
+              <ConfigButton ref={undoButtonRef} size="small" onClick={() => void undoRemoval()} disabled={removed.undoing}>
+                {removed.undoing ? t("skills.undoing") : t("skills.undo")}
+              </ConfigButton>
+            }
+          >
+            {t("skills.removed", { name: removed.name })}
+            {removed.error && <> {t("skills.undoFailed")} {removed.error}</>}
+          </ConfigNotice>
+        )}
 
         {/* Body */}
         <ConfigSplitView>
@@ -1036,6 +1185,8 @@ export function SkillsConfig({
                 onToggle={toggle}
                 toggling={toggling.has(selectedSkill.filePath)}
                 saveError={saveError}
+                removing={removing}
+                onRemove={removeSkill}
                 updateStatus={
                   updateKey(selectedSkill)
                     ? updateStatuses[updateKey(selectedSkill)!]

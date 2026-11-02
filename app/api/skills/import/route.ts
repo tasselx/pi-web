@@ -10,10 +10,13 @@ import { parseFrontmatter } from "@/lib/frontmatter";
 export const dynamic = "force-dynamic";
 
 const VALID_NAME_RE = /^[a-zA-Z0-9_\-.]{1,100}$/;
+// 全由点组成的名字（".", "..", "..."）不能当技能目录名：path.join 会落回 skills 目录本身或其上一级
+// （agent 目录 / 项目的 .pi），目录导入的 cpSync 还会把源文件夹内容覆盖进去；Windows 也会吃掉末尾的点
+const DOTS_ONLY_RE = /^\.+$/;
 
 function sanitizeSkillName(rawName: string): string {
   const trimmed = rawName.trim();
-  if (VALID_NAME_RE.test(trimmed) && trimmed !== "." && trimmed !== "..") {
+  if (VALID_NAME_RE.test(trimmed) && !DOTS_ONLY_RE.test(trimmed)) {
     return trimmed;
   }
   // Sanitize non-standard characters
@@ -21,7 +24,10 @@ function sanitizeSkillName(rawName: string): string {
     .replace(/[^a-zA-Z0-9_\-.]/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 80);
-  return sanitized || `skill-${Date.now().toString(36)}`;
+  // 清洗只替换非法字符，".." 全是合法字符会原样留下；之前只在上面那道门挡了 ".."，掉进这里就被放行，
+  // 所以对清洗结果再查一次，只剩点的名字一律改用兜底名
+  if (!sanitized || DOTS_ONLY_RE.test(sanitized)) return `skill-${Date.now().toString(36)}`;
+  return sanitized;
 }
 
 interface ImportSkillPayload {

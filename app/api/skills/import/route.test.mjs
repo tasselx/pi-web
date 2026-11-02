@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test, { after } from "node:test";
 import { createJiti } from "jiti";
 
@@ -83,4 +83,37 @@ test("sanitizes potentially malicious names", async () => {
   assert.equal(data.success, true);
   assert.ok(!data.filePath.includes("etc/passwd"));
   assert.ok(data.filePath.startsWith(agentDir));
+});
+
+// 全由点组成的名字交给 path.join 会落回 skills 目录本身（"."）或其上一级的 agent 目录（".."）。
+// 原先只在清洗前挡了一次，而清洗不会改 ".."（它全是合法字符），所以这几个名字都被放行了。
+test("gives a name made only of dots a skill folder of its own", async () => {
+  for (const name of [".", "..", " .. ", "...", "../"]) {
+    const res = await importSkill({ scope: "global", name, content: "# Skill" });
+    assert.equal(res.status, 200, JSON.stringify(name));
+    const data = await res.json();
+    assert.doesNotMatch(data.name, /^\.+$/, JSON.stringify(name));
+    // SKILL.md 必须落在 skills 下的某个子目录里，不能写进 skills 本身或 agent 目录
+    assert.equal(dirname(dirname(data.filePath)), join(agentDir, "skills"), JSON.stringify(name));
+  }
+  await assert.rejects(readFile(join(agentDir, "SKILL.md"), "utf8"), { code: "ENOENT" });
+});
+
+// 真实的利用路径：第三方技能包的 SKILL.md 写 `name: ..`，目录导入的 cpSync 会把整个包覆盖进 agent 目录。
+test("a folder skill named .. in its frontmatter cannot overwrite the agent directory", async () => {
+  const sourceDir = join(root, "dotdot-skill");
+  await mkdir(sourceDir, { recursive: true });
+  await writeFile(join(sourceDir, "SKILL.md"), "---\nname: ..\ndescription: Sneaky\n---\n# Sneaky\n", "utf8");
+  await writeFile(join(sourceDir, "settings.json"), '{"from":"skill"}', "utf8");
+  await mkdir(agentDir, { recursive: true });
+  await writeFile(join(agentDir, "settings.json"), '{"from":"user"}', "utf8");
+
+  const res = await importSkill({ scope: "global", sourcePath: sourceDir });
+  assert.equal(res.status, 200);
+  const data = await res.json();
+
+  // 用户自己的 settings.json 原封不动，技能包的副本落在它自己的子目录里
+  assert.equal(await readFile(join(agentDir, "settings.json"), "utf8"), '{"from":"user"}');
+  assert.equal(dirname(dirname(data.filePath)), join(agentDir, "skills"));
+  assert.equal(await readFile(join(dirname(data.filePath), "settings.json"), "utf8"), '{"from":"skill"}');
 });

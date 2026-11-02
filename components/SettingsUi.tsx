@@ -372,6 +372,7 @@ export function ConfigSaveTarget<S extends string>({
   path,
   disabledReason,
   onChange,
+  aside,
   children,
 }: {
   value: S;
@@ -382,6 +383,8 @@ export function ConfigSaveTarget<S extends string>({
   path: ReactNode;
   disabledReason?: string | null;
   onChange: (value: S) => void;
+  /** 紧跟在「全局 | 项目」开关之后、路径之前的操作按钮（如导入）：它作用于当前选中的范围，所以与开关同一行。 */
+  aside?: ReactNode;
   children?: ReactNode;
 }) {
   return (
@@ -394,6 +397,7 @@ export function ConfigSaveTarget<S extends string>({
         size="small"
         onChange={onChange}
       >
+        {aside}
         <span className="config-save-target-path">{typeof path === "string" ? pathWithBreaks(path) : path}</span>
       </ConfigScopeSwitch>
       {children}

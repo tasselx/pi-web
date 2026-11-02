@@ -51,6 +51,8 @@ import {
 } from "./SettingsUi";
 import { itemsToSwitch, projectTrustReloadKey } from "./settings-ui-helpers";
 import { MarkdownBody } from "./MarkdownBody";
+import { UploadIcon } from "./SidebarIcons";
+import { ImportSkillDialog } from "./ImportSkillDialog";
 
 type SkillScope = "global" | "project" | "path";
 type Translate = ReturnType<typeof useI18n>["t"];
@@ -417,11 +419,13 @@ function AddSkillPanel({
   installedPackages,
   projectResourcesLoaded,
   onInstalled,
+  onImported,
 }: {
   cwd: string;
   installedPackages: Record<SkillInstallScope, ReadonlySet<string>>;
   projectResourcesLoaded: boolean;
   onInstalled: () => void;
+  onImported: (result: { filePath: string }) => void;
 }) {
   const { t } = useI18n();
   const [query, setQuery] = useState("");
@@ -434,6 +438,7 @@ function AddSkillPanel({
     new Set(),
   );
   const [scope, setScope] = useState<"global" | "project">("global");
+  const [importOpen, setImportOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -500,6 +505,7 @@ function AddSkillPanel({
     scope === "global"
       ? "~/.pi/agent/skills/"
       : `${shortenPath(cwd)}/.pi/skills/`;
+  const importLabel = t("skills.import.importToScope", { scope: scopeLabel(scope, t) });
 
   return (
     <ConfigDetailStack className="is-full-height">
@@ -526,6 +532,17 @@ function AddSkillPanel({
               path={installPath}
               disabledReason={t("trust.projectScopeUnavailable")}
               onChange={setScope}
+              // 导入入口紧挨「全局 | 项目」：导入到哪里，由当前选中的范围决定
+              aside={
+                <ConfigButton
+                  size="small"
+                  title={importLabel}
+                  aria-label={importLabel}
+                  onClick={() => setImportOpen(true)}
+                >
+                  <UploadIcon size={13} />
+                </ConfigButton>
+              }
             />
           }
         />
@@ -677,6 +694,19 @@ function AddSkillPanel({
             );
           })}
         </div>
+      )}
+
+      {importOpen && (
+        <ImportSkillDialog
+          cwd={cwd}
+          scope={scope}
+          targetRoot={installPath}
+          onClose={() => setImportOpen(false)}
+          onImported={(result) => {
+            setImportOpen(false);
+            onImported(result);
+          }}
+        />
       )}
     </ConfigDetailStack>
   );
@@ -1175,6 +1205,13 @@ export function SkillsConfig({
                 }}
                 onInstalled={() => {
                   void loadSkills();
+                }}
+                onImported={(result) => {
+                  // 导入完成：刷新列表，选中新技能并回到详情页
+                  void loadSkills().then(() => {
+                    setSelected(result.filePath);
+                    setAddMode(false);
+                  });
                 }}
               />
             ) : loading ? null : selectedSkill ? (

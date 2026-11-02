@@ -3,7 +3,8 @@
 /**
  * 轨迹视图的数据：一个会话当前分支的消息，会话在跑时保持更新。
  *
- * 和子代理查看器（components/SubagentViewer.tsx）同一条路：轮询
+ * 沿用原子代理查看器的路子（那个查看器已被上游的 SessionChatPanel 取代，它的分页合并
+ * 函数留在 components/subagent-viewer-state.ts，现在只有这里在用）：轮询
  * `GET /api/sessions/[id]/context`，它读运行中 wrapper 的内存条目、停下后读文件，
  * 从不创建 wrapper，所以打开轨迹绝不会唤醒或干扰一个会话。条目一旦追加就不再变，
  * 轮询只取最新一小段并入已加载的部分（`mergeTailPage`），向前翻页用 `prependOlderPage`。

@@ -28,6 +28,7 @@ import { useIsMobile } from "@/hooks/useIsMobile";
 import { useI18n } from "@/hooks/useI18n";
 import { useChatAppearance } from "@/hooks/useChatAppearance";
 import type { ToolPreset } from "@/lib/tool-presets";
+import { quoteSeparator } from "@/lib/quoted-selection";
 import { ModelSelector, type ModelSelectorOption } from "./ModelSelector";
 
 export { filterModelOptions } from "./ModelSelector";
@@ -86,8 +87,9 @@ interface Props {
 }
 
 export interface ChatInputHandle {
-  /** block：插入的是 Markdown 块（引用），要另起一行，与前文空一行；默认只在前文后补一个空格。 */
-  insertText: (text: string, options?: { block?: boolean }) => void;
+  insertText: (text: string) => void;
+  /** Insert at the caret as a paragraph of its own: a blockquote must start a line. */
+  insertQuote: (text: string) => void;
   insertIfEmpty: (text: string) => void;
   replaceMessage: (message: UserMessage) => void;
   prependText: (text: string) => void;
@@ -118,13 +120,6 @@ export function getUpwardMenuMaxHeight(menuBottom: number, visibleTop: number, g
 export function cycleListIndex(index: number, length: number, delta: number): number {
   if (length <= 0) return 0;
   return ((index + delta) % length + length) % length;
-}
-
-// 插入「块」（如引用）时补的分隔符：`> ` 必须在行首才是 Markdown 引用，
-// 所以插入点前有字就补到刚好空出一行；输入框为空或前面已空一行则什么都不补。
-function blockSeparator(before: string): string {
-  if (before.length === 0 || before.endsWith("\n\n")) return "";
-  return before.endsWith("\n") ? "\n" : "\n\n";
 }
 
 export function replaceLinksWithMarkdown(
@@ -778,19 +773,41 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       ta.focus();
       ta.setSelectionRange(ta.value.length, ta.value.length);
     },
-    insertText(text: string, options?: { block?: boolean }) {
+    insertText(text: string) {
       const ta = textareaRef.current;
       if (!ta) {
-        setValue((v) => v + (options?.block ? blockSeparator(v) : v ? " " : "") + text);
+        setValue((v) => v + (v ? " " : "") + text);
         return;
       }
       const start = ta.selectionStart ?? ta.value.length;
       const end = ta.selectionEnd ?? ta.value.length;
       const before = ta.value.slice(0, start);
       const after = ta.value.slice(end);
-      const sep = options?.block
-        ? blockSeparator(before)
-        : before.length > 0 && !before.endsWith(" ") ? " " : "";
+      const sep = before.length > 0 && !before.endsWith(" ") ? " " : "";
+      const newVal = before + sep + text + after;
+      valueRef.current = newVal;
+      setValue(newVal);
+      setAtQuery(null);
+      requestAnimationFrame(() => {
+        if (!ta) return;
+        const pos = start + sep.length + text.length;
+        ta.setSelectionRange(pos, pos);
+        ta.focus();
+        ta.style.height = "auto";
+        ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
+      });
+    },
+    insertQuote(text: string) {
+      const ta = textareaRef.current;
+      if (!ta) {
+        setValue((v) => v + quoteSeparator(v) + text);
+        return;
+      }
+      const start = ta.selectionStart ?? ta.value.length;
+      const end = ta.selectionEnd ?? ta.value.length;
+      const before = ta.value.slice(0, start);
+      const after = ta.value.slice(end);
+      const sep = quoteSeparator(before);
       const newVal = before + sep + text + after;
       valueRef.current = newVal;
       setValue(newVal);

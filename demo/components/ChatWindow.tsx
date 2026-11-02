@@ -407,10 +407,9 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     };
   }, [quotedSelection, quoteInputOpen, quoteSubmitting, closeQuotedSelection]);
 
-  const askSelectionHere = useCallback(() => {
+  const quoteSelectionHere = useCallback(() => {
     if (!quotedSelection) return;
-    // block：`> ` 必须在行首才是 Markdown 引用；输入框里已有文字时，先空一行再插入。
-    chatInputRef?.current?.insertText(buildQuotedSelection(quotedSelection.text), { block: true });
+    chatInputRef?.current?.insertQuote(buildQuotedSelection(quotedSelection.text));
     // No `removeAllRanges()` here: inserting focuses the composer, and that
     // focus already collapses the page's selection. Calling it afterwards also
     // clears the composer's own selection and drops its caret to offset 0
@@ -1263,7 +1262,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
         <div
           ref={quotePopoverRef}
           role={quoteInputOpen ? "dialog" : "toolbar"}
-          aria-label={t(quoteInputOpen ? "chat.newQuoteChat" : "chat.askSelection")}
+          aria-label={t(quoteInputOpen ? "chat.newQuoteChat" : "chat.selectionActions")}
           style={{
             position: "fixed",
             top: quotedSelection.top,
@@ -1308,17 +1307,17 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
           <button
             type="button"
             className="file-viewer-icon-button"
-            title={t("chat.askInCurrent")}
-            aria-label={t("chat.askInCurrent")}
+            title={t("chat.quoteSelection")}
+            aria-label={t("chat.quoteSelection")}
             onPointerDown={(event) => event.preventDefault()}
-            onClick={askSelectionHere}
+            onClick={quoteSelectionHere}
             style={{ width: "auto", height: 35, flex: "0 0 auto", gap: 5, padding: "0 10px", border: "none", fontSize: 12, fontWeight: 500 }}
           >
-            {/* 引号图标：这个按钮做的是「把选中文字作为引用块放进输入框」，不再用 @（那是提及文件的符号） */}
-            <svg width="13" height="13" viewBox="3 4 18 16" fill="currentColor" aria-hidden="true">
-              <path d="M4 6h6v7l-3 5H5l2-5H4zM14 6h6v7l-3 5h-2l2-5h-3z" />
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M16 3a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2 1 1 0 0 1 1 1v1a2 2 0 0 1-2 2 1 1 0 0 0-1 1v2a1 1 0 0 0 1 1 6 6 0 0 0 6-6V5a2 2 0 0 0-2-2z" />
+              <path d="M5 3a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2 1 1 0 0 1 1 1v1a2 2 0 0 1-2 2 1 1 0 0 0-1 1v2a1 1 0 0 0 1 1 6 6 0 0 0 6-6V5a2 2 0 0 0-2-2z" />
             </svg>
-            <span>{t("chat.askInCurrent")}</span>
+            <span>{t("chat.quoteSelection")}</span>
           </button>
           {onAskInNewChat && quotedSelection.sourceEntryId && !sessionBusy && (
             <button

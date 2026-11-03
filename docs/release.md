@@ -5,6 +5,8 @@ This repo publishes two artifacts for each release:
 - npm package: `@tasselx/pi-web`
 - GitHub Release: `tasselx/pi-web`
 
+Pushing a `v*.*.*` tag starts the `Release & Publish` workflow (`.github/workflows/release.yml`): it builds from a clean checkout, creates the GitHub Release and publishes the npm package through OIDC (npm Trusted Publishing). This checklist prepares that tag and then writes the release notes. Do not run `npm publish` or `npm run release` yourself: npm rejects a second publish of the same version, so the workflow's publish step would fail.
+
 Use this checklist from a clean `main` checkout.
 
 ## 1. Preflight
@@ -15,10 +17,8 @@ git status --short --branch
 git log --oneline --decorate -5
 git rev-list --left-right --count main...origin/main
 gh auth status
-npm whoami
 node -e "const p=require('./package.json'); console.log(p.version)"
-lsof -nP -iTCP:30141 -sTCP:LISTEN
-ls .next/server/route-cache
+gh run list --workflow CI --branch main --limit 1
 ```
 
 Expected:
@@ -26,9 +26,8 @@ Expected:
 - `git status` is clean, or only contains changes you intentionally plan to release.
 - `main` and `origin/main` are aligned (`0	0`).
 - GitHub is authenticated as an account that can push and create releases.
-- npm is authenticated as an account that can publish `@tasselx/pi-web`.
-- No dev server is listening on 30141: the production build rewrites `.next/` and breaks a running `npm run dev`. Stop it first.
-- `.next/server/route-cache/` does not exist. An e2e run in `start` mode writes it (`next start` does, the build does not), and it would be published. Delete it if present.
+- The latest `CI` run on `main` succeeded. The release workflow runs lint, `tsc` and the tests again, but a red `main` is cheaper to fix before the tag exists.
+- No local build is needed: the workflow builds from a clean checkout, so a running `npm run dev`, leftovers in `.next/` and npm credentials on this machine do not matter.
 
 Before bumping, confirm the next version is free (replace `<version>`):
 
@@ -37,41 +36,18 @@ npm view @tasselx/pi-web@<version> version --registry https://registry.npmjs.org
 git ls-remote --tags origin v<version>                                            # expect empty
 ```
 
-## 2. Publish to npm
+## 2. Bump the Version
 
-Patch release:
+Choosing the bump: look at `git log --oneline v<previous>..HEAD`. A batch of `feat:` commits (new UI, new commands, new settings) is a minor; only fixes and small adjustments is a patch. Decide before bumping, since a published version cannot be reused.
 
-```bash
-npm run release
-```
-
-The release script runs:
+Set the new version without building or publishing anything on this machine:
 
 ```bash
-npm version patch --no-git-tag-version && npm run build && npm publish --access public
+npm version <x.y.z> --no-git-tag-version
+git diff --numstat -- package.json package-lock.json
 ```
 
-`npm run release` only bumps the patch number. For a minor (or major) release, set the version yourself and run the other two steps separately:
-
-```bash
-npm version <x.y.0> --no-git-tag-version
-npm run build
-npm publish --access public
-```
-
-Choosing the bump: look at `git log --oneline v<previous>..HEAD`. A batch of `feat:` commits (new UI, new commands, new settings) is a minor; only fixes and small adjustments is a patch. Decide before running the script, since a published version cannot be reused.
-
-Notes:
-
-- This bumps `package.json` and `package-lock.json`.
-- It intentionally runs a production build. Do not run `next build` during normal development; release work is the exception.
-- A newly published version may take a few minutes to show up. `npm view @tasselx/pi-web@<version> version` can return E404 and `npm view @tasselx/pi-web version` can show the previous version even though the publish printed `+ @tasselx/pi-web@<version>`. This is registry propagation, not a failed publish: do not publish again. Poll the registry until the version appears:
-
-```bash
-curl -s https://registry.npmjs.org/@tasselx%2Fpi-web/<version> | head -c 80   # JSON once it exists, "version not found" before
-npm view @tasselx/pi-web dist-tags --registry https://registry.npmjs.org/
-npm view @tasselx/pi-web versions --json --registry https://registry.npmjs.org/
-```
+Expect `1 1` for `package.json` (the version line) and `2 2` for `package-lock.json` (its two version fields). Anything else means more than the bump changed: revert and look. The workflow builds and publishes from the tag in step 4, so there is no `npm run build` or `npm publish` here.
 
 ## 3. Commit the Version Bump
 
@@ -82,6 +58,8 @@ git diff -- package.json package-lock.json
 git add package.json package-lock.json
 git commit -m "Release v<version>"
 ```
+
+Stage only those two files (`git diff --cached --name-only` lists exactly them). A block `next dev` appended to `AGENTS.md`, for one, stays out of the release commit.
 
 ## 4. Tag and Push
 
@@ -97,6 +75,21 @@ Confirm the tag does not already exist before creating it when unsure:
 ```bash
 git ls-remote --tags origin v<version>
 gh release view v<version> --repo tasselx/pi-web
+```
+
+Pushing the tag starts the `Release & Publish` workflow. It installs from a clean checkout, runs `npm run lint`, `npx tsc --noEmit` and `npm test`, builds with `npm run build`, creates the GitHub Release with generated notes (only a "Full Changelog" link) and publishes `@tasselx/pi-web` to npm through OIDC. It takes about 4 to 6 minutes. Watch it:
+
+```bash
+gh run list --workflow release.yml --limit 3
+gh run watch <run-id> --exit-status
+```
+
+A newly published version may take a few minutes to show up (the publish step says so itself). `npm view @tasselx/pi-web@<version> version` can return E404 and `npm view @tasselx/pi-web version` can show the previous version even though the publish step printed `+ @tasselx/pi-web@<version>`. This is registry propagation, not a failed publish: do not publish again. Poll the registry until the version appears:
+
+```bash
+curl -s https://registry.npmjs.org/@tasselx%2Fpi-web/<version> | head -c 80   # JSON once it exists, "version not found" before
+npm view @tasselx/pi-web dist-tags --registry https://registry.npmjs.org/
+npm view @tasselx/pi-web versions --json --registry https://registry.npmjs.org/
 ```
 
 ## 5. Generate Release Notes from Commits
@@ -160,19 +153,9 @@ Prepared from commits in `v<previous>..v<version>`.
 - Published npm package `@tasselx/pi-web@<version>`.
 ```
 
-## 6. Create or Update the GitHub Release
+## 6. Update the GitHub Release
 
-Create a new release:
-
-```bash
-gh release create v<version> \
-  --repo tasselx/pi-web \
-  --verify-tag \
-  --title "v<version>" \
-  --notes-file "$NOTES"
-```
-
-If the release already exists and only the notes need updating:
+The workflow already created the release in step 4. Its generated notes are only a "Full Changelog" link; replace them with the notes from step 5:
 
 ```bash
 gh release edit v<version> \
@@ -194,9 +177,20 @@ gh release edit v<version> --repo tasselx/pi-web --notes-file - <<'EOF'
 EOF
 ```
 
+If the workflow did not create the release, create it by hand (`--verify-tag` refuses a tag that is not on origin):
+
+```bash
+gh release create v<version> \
+  --repo tasselx/pi-web \
+  --verify-tag \
+  --title "v<version>" \
+  --notes-file "$NOTES"
+```
+
 ## 7. Final Verification
 
 ```bash
+gh run list --limit 4
 gh release view v<version> --repo tasselx/pi-web
 npm view @tasselx/pi-web@<version> version --registry https://registry.npmjs.org/
 npm view @tasselx/pi-web dist-tags --registry https://registry.npmjs.org/
@@ -207,8 +201,9 @@ git ls-remote --tags origin
 
 Expected:
 
-- GitHub Release exists and is not a draft unless intentionally published as one.
-- npm exact version resolves and `latest` points at it (allow a few minutes, see step 2).
+- The `Release & Publish` run for the tag and the `CI` run for the release commit succeeded. `Demo`, which redeploys the GitHub Pages site on every push to `main`, should be green too.
+- GitHub Release exists, carries the notes from step 6 and is not a draft unless intentionally published as one.
+- npm exact version resolves and `latest` points at it (allow a few minutes, see step 4).
 - `git ls-remote --tags origin` shows no tag you did not mean to publish.
 - `main` is aligned with `origin/main`.
 - `HEAD` points at the release commit and `v<version>` tag.

@@ -23,8 +23,8 @@ import type { SubagentToolDetails } from "@/lib/subagent-extension";
 import { CODEMODE_TOOL_NAME, codemodeCalls, codemodeScript, codemodeScriptPreview, stripCodemodeHeader } from "@/lib/codemode-view";
 import { CodemodeCallList } from "./CodemodeToolView";
 import { toolFieldsOfInput, type ToolField } from "@/lib/tool-fields";
-// Demo: the demo ships no pi SDK, so pi-ai's parseStreamingJson is replaced by
-// the partial-json parser it wraps (see parseStreamingJson below).
+// Demo：演示不带 pi SDK，pi-ai 的 parseStreamingJson 没法导入，
+// 所以换成它包着的 partial-json 解析器（见下面的 parseStreamingJson）。
 import { parse as parsePartialJson } from "partial-json";
 import { mcpToolLabel, prettyMcpResultText } from "@/lib/mcp-tool-display";
 import { streamRateKey, streamRateStart, streamTokensPerSecond, type StreamRateStart } from "@/lib/stream-token-rate";
@@ -44,8 +44,8 @@ import type {
   ThinkingContent,
 } from "@/lib/types";
 
-// Demo: same contract as pi-ai's parseStreamingJson, which the app imports from
-// the SDK: the input so far as far as it parses, {} when nothing does.
+// Demo：与主应用从 SDK 导入的 parseStreamingJson 同一约定——
+// 已到达的部分能解析多少就返回多少，一点都解析不了就返回 {}。
 function parseStreamingJson(partialJson: string | undefined): unknown {
   if (!partialJson || partialJson.trim() === "") return {};
   try {

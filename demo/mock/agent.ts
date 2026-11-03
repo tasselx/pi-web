@@ -4,6 +4,7 @@
  * with the same event sequence a real pi run produces.
  */
 import type { AgentMessage, AssistantMessage, SessionEntry, ToolResultMessage } from "@/lib/types";
+import { computeSessionTotalActiveMs } from "@/lib/session-timing";
 import type { MockEventSource } from "./event-source";
 import { currentDemoLocale } from "./locale";
 import { delay } from "./http";
@@ -129,6 +130,8 @@ export async function agentState(session: MockSession) {
     contextUsage: tokens === null
       ? { percent: null, contextWindow, tokens: null }
       : { percent: (tokens / contextWindow) * 100, contextWindow, tokens },
+    // 与主应用的 get_state 一致：运行期间活动时间按实时条目算，不用打开页面时的快照值。
+    totalActiveMs: computeSessionTotalActiveMs(session.entries),
     systemPrompt: await systemPromptFor(session),
     thinkingLevel: live.thinkingLevel,
     extensionStatuses: [],

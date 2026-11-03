@@ -6,6 +6,9 @@ declare module "@earendil-works/pi-coding-agent" {
   export type AgentSessionEvent = any;
   export type BashOperations = any;
   export type JsonAgentSessionEvent = any;
+  export type LoadExtensionsResult = any;
+  export type McpExposure = any;
+  export type McpServerConfig = any;
   export type ResourceDiagnostic = any;
   export type SessionManager = any;
   export type SettingsManager = any;

@@ -1,11 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import { countRunningSubagents, sideChatTitle } from "@/lib/session-family";
 import type { SessionUsageSummary } from "@/lib/session-stats";
 import { formatActiveDuration, formatCompactCount, formatCostShort } from "@/lib/session-stats-format";
 import type { SessionInfo, SubagentSessionStatus } from "@/lib/types";
+import { DeleteConfirm } from "./SessionTree";
+import { TrashIcon } from "./SidebarIcons";
 
 interface Props {
   rootSession: SessionInfo;
@@ -19,6 +21,8 @@ interface Props {
   onToggleSubagentTab: (sessionId: string, label: string, side?: boolean) => void;
   /** Forks the main agent into a side chat and opens its tab; answers the refusal to show, or null. */
   onNewSideChat: () => Promise<string | null>;
+  /** Deletes one side chat and its tab; answers the failure to show, or null. */
+  onDeleteSideChat: (sessionId: string) => Promise<string | null>;
 }
 
 const STATS_POLL_MS = 3000;
@@ -177,6 +181,10 @@ function AgentRow({
   onToggleTab,
   onNewSideChat,
   newSideChatPending,
+  onDelete,
+  confirming,
+  onDeleteConfirm,
+  onDeleteCancel,
 }: {
   session: SessionInfo;
   main?: boolean;
@@ -188,6 +196,10 @@ function AgentRow({
   onToggleTab?: () => void;
   onNewSideChat?: () => void;
   newSideChatPending?: boolean;
+  onDelete?: () => void;
+  confirming?: boolean;
+  onDeleteConfirm?: () => void;
+  onDeleteCancel?: () => void;
 }) {
   const { locale, t } = useI18n();
   const relation = session.relation?.kind === "subagent" ? session.relation : null;
@@ -205,9 +217,47 @@ function AgentRow({
     thinkingLevel,
     formatRelativeTime(session.modified, locale),
   ].filter(Boolean).join(" · ");
+  const rowRef = useRef<HTMLDivElement>(null);
+  // The row's height when Delete was clicked: a usage line makes it taller
+  // than 56px, and the confirmation in its place keeps the list still.
+  const [confirmHeight, setConfirmHeight] = useState<number>();
+
+  if (confirming && onDeleteConfirm && onDeleteCancel) {
+    return (
+      // The sidebar's confirmation, in a row as tall as the one it replaces.
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 5,
+          height: confirmHeight,
+          minHeight: 56,
+          padding: "7px 12px",
+          borderBottom: "1px solid var(--border)",
+          background: "rgba(239, 68, 68, 0.06)",
+          boxShadow: "inset 0 0 0 1px rgba(239, 68, 68, 0.35)",
+        }}
+        onKeyDown={(event) => {
+          if (event.key !== "Escape") return;
+          event.preventDefault();
+          event.stopPropagation();
+          onDeleteCancel();
+        }}
+      >
+        <DeleteConfirm
+          label={t("sidebar.deleteSession", { title: primary })}
+          deleteLabel={t("sidebar.delete")}
+          cancelLabel={t("sidebar.cancel")}
+          onConfirm={onDeleteConfirm}
+          onCancel={onDeleteCancel}
+        />
+      </div>
+    );
+  }
 
   return (
     <div
+      ref={rowRef}
       style={{
         display: "flex",
         borderBottom: "1px solid var(--border)",
@@ -298,22 +348,37 @@ function AgentRow({
           </svg>
         </RowSideButton>
       )}
+      {onDelete && (
+        <RowSideButton
+          title={t("sidebar.delete")}
+          danger
+          onClick={() => {
+            setConfirmHeight(rowRef.current?.offsetHeight);
+            onDelete();
+          }}
+        >
+          <TrashIcon size={14} />
+        </RowSideButton>
+      )}
     </div>
   );
 }
 
-function RowSideButton({ title, pressed, disabled, onClick, children }: {
+function RowSideButton({ title, pressed, danger, disabled, onClick, children }: {
   title: string;
   pressed?: boolean;
+  danger?: boolean;
   disabled?: boolean;
   onClick: () => void;
   children: ReactNode;
 }) {
   const state = disabled
     ? "cursor-not-allowed text-text-dim opacity-40"
-    : pressed
-      ? "cursor-pointer text-accent hover:bg-bg-hover"
-      : "cursor-pointer text-text-muted hover:bg-bg-hover hover:text-text";
+    : danger
+      ? "cursor-pointer text-text-muted hover:bg-[rgba(239,68,68,0.08)] hover:text-[#ef4444] focus-visible:bg-[rgba(239,68,68,0.08)] focus-visible:text-[#ef4444]"
+      : pressed
+        ? "cursor-pointer text-accent hover:bg-bg-hover"
+        : "cursor-pointer text-text-muted hover:bg-bg-hover hover:text-text";
   return (
     <button
       type="button"
@@ -330,11 +395,13 @@ function RowSideButton({ title, pressed, disabled, onClick, children }: {
   );
 }
 
-export function AgentSessionPanel({ rootSession, subagents, selectedSessionId, runningSessionIds, onSelectSession, openSubagentTabIds, onToggleSubagentTab, onNewSideChat }: Props) {
+export function AgentSessionPanel({ rootSession, subagents, selectedSessionId, runningSessionIds, onSelectSession, openSubagentTabIds, onToggleSubagentTab, onNewSideChat, onDeleteSideChat }: Props) {
   const { t } = useI18n();
   const [query, setQuery] = useState("");
   const [newSideChatPending, setNewSideChatPending] = useState(false);
   const [newSideChatError, setNewSideChatError] = useState<string | null>(null);
+  const [confirmDeleteSideChatId, setConfirmDeleteSideChatId] = useState<string | null>(null);
+  const [deleteSideChatError, setDeleteSideChatError] = useState<string | null>(null);
   const handleNewSideChat = async () => {
     setNewSideChatPending(true);
     setNewSideChatError(null);
@@ -345,6 +412,18 @@ export function AgentSessionPanel({ rootSession, subagents, selectedSessionId, r
     } finally {
       setNewSideChatPending(false);
     }
+  };
+  // As the sidebar's: the confirmation goes at once, a failure shows above the rows.
+  const handleDeleteSideChat = async (sessionId: string) => {
+    setConfirmDeleteSideChatId(null);
+    setDeleteSideChatError(null);
+    let error: string | null;
+    try {
+      error = await onDeleteSideChat(sessionId);
+    } catch (caught) {
+      error = caught instanceof Error ? caught.message : String(caught);
+    }
+    if (error) setDeleteSideChatError(t("sidebar.deleteFailed", { error }));
   };
   const sortedSubagents = useMemo(() => [...subagents].sort((a, b) => {
     const aRunning = runningSessionIds.has(a.id);
@@ -452,9 +531,9 @@ export function AgentSessionPanel({ rootSession, subagents, selectedSessionId, r
             onNewSideChat={handleNewSideChat}
             newSideChatPending={newSideChatPending}
           />
-          {newSideChatError && (
+          {(newSideChatError || deleteSideChatError) && (
             <div role="alert" style={{ padding: "6px 12px", borderBottom: "1px solid var(--border)", color: "#dc2626", fontSize: 12, overflowWrap: "anywhere" }}>
-              {newSideChatError}
+              {newSideChatError ?? deleteSideChatError}
             </div>
           )}
           {visibleSubagents.map((session) => (
@@ -474,6 +553,10 @@ export function AgentSessionPanel({ rootSession, subagents, selectedSessionId, r
                 }
                 onToggleSubagentTab(session.id, relation?.description || relation?.profile || sessionTitle(session));
               }}
+              onDelete={session.relation?.kind === "side" ? () => setConfirmDeleteSideChatId(session.id) : undefined}
+              confirming={confirmDeleteSideChatId === session.id}
+              onDeleteConfirm={() => { void handleDeleteSideChat(session.id); }}
+              onDeleteCancel={() => setConfirmDeleteSideChatId(null)}
             />
           ))}
           {subagents.length > 0 && visibleSubagents.length === 0 && (

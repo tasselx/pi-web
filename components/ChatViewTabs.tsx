@@ -18,8 +18,11 @@ interface ChatViewTabsProps {
   trajectoryDisabled: boolean;
   /** 指针移上 / 聚焦 / 触到「轨迹」标签：多半马上要点它，调用方趁这点时间把代码和数据先备好。 */
   onTrajectoryIntent?: () => void;
-  /** 手机顶栏：只画图标，每个标签这么宽（px）；不给就是桌面的图标加文字。 */
-  iconWidth?: number;
+  /**
+   * 手机顶栏：只画图标，每个标签这么宽；不给就是桌面的图标加文字。数字按 px；顶栏的方格随触屏变化
+   * （--top-bar-height，36px / 44px），调用方传的是 CSS 变量，所以也收 CSS 长度字符串。
+   */
+  iconWidth?: number | string;
 }
 
 /**

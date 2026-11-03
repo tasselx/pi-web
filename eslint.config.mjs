@@ -9,6 +9,7 @@ const eslintConfig = [
   {
     rules: {
       "react-hooks/immutability": "off",
+      "react-hooks/preserve-manual-memoization": "off",
       "react-hooks/refs": "off",
       "react-hooks/set-state-in-effect": "off",
       // eslint-plugin-react-hooks 7.1 起该规则对手写的 useCallback/useMemo 报「编译器会跳过此处」；

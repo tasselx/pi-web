@@ -26,7 +26,7 @@ Expected:
 - `git status` is clean, or only contains changes you intentionally plan to release.
 - `main` and `origin/main` are aligned (`0	0`).
 - GitHub is authenticated as an account that can push and create releases.
-- The latest `CI` run on `main` succeeded. The release workflow runs lint, `tsc` and the tests again, but a red `main` is cheaper to fix before the tag exists.
+- The latest `CI` run on `main` succeeded, and every commit meant for this release is already on `origin/main`: a commit that exists only locally (a merge, say) has had no CI run, so push `main` and wait for CI first. The release workflow runs lint, `tsc` and the tests again, but a red `main` is cheaper to fix before the tag exists.
 - No local build is needed: the workflow builds from a clean checkout, so a running `npm run dev`, leftovers in `.next/` and npm credentials on this machine do not matter.
 
 Before bumping, confirm the next version is free (replace `<version>`):
@@ -84,6 +84,8 @@ gh run list --workflow release.yml --limit 3
 gh run watch <run-id> --exit-status
 ```
 
+The same push to `main` also redeploys the demo (`demo-pages.yml`), since the release commit changes `package.json`.
+
 A newly published version may take a few minutes to show up (the publish step says so itself). `npm view @tasselx/pi-web@<version> version` can return E404 and `npm view @tasselx/pi-web version` can show the previous version even though the publish step printed `+ @tasselx/pi-web@<version>`. This is registry propagation, not a failed publish: do not publish again. Poll the registry until the version appears:
 
 ```bash
@@ -91,6 +93,17 @@ curl -s https://registry.npmjs.org/@tasselx%2Fpi-web/<version> | head -c 80   # 
 npm view @tasselx/pi-web dist-tags --registry https://registry.npmjs.org/
 npm view @tasselx/pi-web versions --json --registry https://registry.npmjs.org/
 ```
+
+### Pushed the tag too early
+
+If the tag went out before the release was ready (a commit still missing, say), cancel the run before its `Publish to npm` step:
+
+```bash
+gh run cancel <run-id>
+curl -s https://registry.npmjs.org/@tasselx%2Fpi-web/<version> | head -c 80   # still "version not found"
+```
+
+Nothing is published yet, but a tag that is already on origin is better not rewritten: fix the cause on `main` and release the next patch instead. The unpublished `v<version>` tag stays on origin, so base the next release notes on the last version that was published and say there that the skipped tag was never released. The workflow creates the GitHub Release before it publishes, so a run cancelled after that step also leaves a release page for a version npm does not have: `gh release delete v<version> --repo tasselx/pi-web` removes it.
 
 ## 5. Generate Release Notes from Commits
 
@@ -201,7 +214,7 @@ git ls-remote --tags origin
 
 Expected:
 
-- The `Release & Publish` run for the tag and the `CI` run for the release commit succeeded. `Demo`, which redeploys the GitHub Pages site on every push to `main`, should be green too.
+- The `Release & Publish` run for the tag and the `CI` run for the release commit succeeded. `Demo`, which the release commit triggers because it changes `package.json`, should be green too.
 - GitHub Release exists, carries the notes from step 6 and is not a draft unless intentionally published as one.
 - npm exact version resolves and `latest` points at it (allow a few minutes, see step 4).
 - `git ls-remote --tags origin` shows no tag you did not mean to publish.

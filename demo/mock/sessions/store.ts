@@ -5,7 +5,7 @@
  */
 import type { AgentMessage, SessionContext, SessionEntry, SessionInfo } from "@/lib/types";
 import { normalizeToolCalls } from "@/lib/normalize";
-import { getThinkingPreview } from "@/lib/message-display";
+import { getThinkingPreview, isMessageGroupAnchor } from "@/lib/message-display";
 import { computeSessionStats, type SessionUsageSummary } from "@/lib/session-stats";
 import { forkSessionName, sessionDisplayTitle } from "@/lib/session-fork-name";
 import { computeSessionTotalActiveMs } from "@/lib/session-timing";
@@ -301,10 +301,27 @@ export function sessionSettings(entries: SessionEntry[], leafId: string | null):
   return { thinkingLevel: thinkingLevel ?? "off", model: changedModel ?? responseModel ?? null };
 }
 
+/**
+ * 当前页第一条之前、没加载的轮数（主应用 session-reader 的 countTurnsBefore）：
+ * 聊天小地图按它给已加载的轮次编号，翻到更早的页之后编号不变。
+ */
+function countTurnsBefore(entries: SessionEntry[], oldest: SessionEntry): number {
+  const byId = new Map(entries.map((entry) => [entry.id, entry]));
+  let turns = 0;
+  let current = oldest.parentId ? byId.get(oldest.parentId) : undefined;
+  while (current) {
+    const message = entryToUiMessage(current, {});
+    if (message && isMessageGroupAnchor(message)) turns++;
+    current = current.parentId ? byId.get(current.parentId) : undefined;
+  }
+  return turns;
+}
+
 export function buildContext(session: MockSession, leafId: string | null | undefined, options: ContextOptions): SessionContext {
   const effectiveLeaf = leafId === undefined ? session.leafId : leafId;
   const tail = options.tail ?? 50;
   const sliced = sliceActiveBranch(session.entries, effectiveLeaf, tail, options.excludeLeaf);
+  const hasMore = Boolean(tail > 0 && sliced[0]?.parentId);
   const messages: AgentMessage[] = [];
   const entryIds: string[] = [];
   for (const entry of sliced) {
@@ -318,7 +335,8 @@ export function buildContext(session: MockSession, leafId: string | null | undef
     messages,
     entryIds,
     oldestEntryId: sliced[0]?.id ?? null,
-    hasMore: Boolean(tail > 0 && sliced[0]?.parentId),
+    hasMore,
+    turnsBefore: hasMore ? countTurnsBefore(session.entries, sliced[0]) : 0,
     ...sessionSettings(session.entries, effectiveLeaf),
   };
 }

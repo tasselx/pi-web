@@ -3,7 +3,9 @@
  * real route handlers under app/api in the main project: same paths, methods
  * and response shapes.
  */
+import type { AppUpdateResponse, ProjectTrustResponse } from "@/lib/api-types";
 import { buildEntriesFromFiles, filterFileEntries } from "@/lib/file-fuzzy";
+import type { SessionUsageSummary } from "@/lib/session-stats";
 import { MockEventSource } from "./event-source";
 import { MockRequest, delay, error, json } from "./http";
 import { setRealFetch } from "./runtime";
@@ -16,18 +18,22 @@ import {
   buildContext,
   deleteSession,
   ensureSessions,
+  forkSession,
   getSession,
   markTouched,
   sessionDetail,
   sessionInfo,
   sessionListVersion,
   bumpSessionListVersion,
+  usageSummary,
 } from "./sessions/store";
 import { searchSessions } from "./search";
 import { autoTitle } from "./replies";
 import { demoOnlyMessage } from "./unavailable";
+import { DEMO_PROJECT_TRUST, mcpRoute } from "./mcp";
 import { settingsRoutes } from "./settings-routes";
 import { attachTerminalStream, terminalRoutes } from "./terminal";
+import { sessionUiStateRevision, sessionUiStateRoute } from "./ui-state";
 
 type Handler = (request: MockRequest) => Promise<Response> | Response;
 
@@ -41,13 +47,52 @@ function sessionsPayload() {
     sessions: allSessions().filter((session) => !session.transient).map(sessionInfo),
     sessionListVersion: sessionListVersion(),
     runningSessionIds: runningSessionIds(),
+    // 演示里没有扩展会停下来等用户输入。
+    awaitingInputSessionIds: [],
     completionNotificationSuppressedSessionIds: [],
   };
+}
+
+/** 请求体里的 ids：非空的会话 id 列表（去重），否则 null。 */
+function sessionIdsOf(body: { ids?: unknown }): string[] | null {
+  const { ids } = body;
+  return Array.isArray(ids) && ids.length > 0 && ids.every((id): id is string => typeof id === "string") ? [...new Set(ids)] : null;
+}
+
+// POST /api/sessions/stats：智能体切换器每一行的用量，找不到的 id 不出现在结果里。
+async function sessionsStats(request: MockRequest): Promise<Response> {
+  const ids = sessionIdsOf(await request.json());
+  if (!ids) return error("ids must be a non-empty list of session ids", 400);
+  const stats: Record<string, SessionUsageSummary> = {};
+  for (const id of ids) {
+    const session = getSession(id);
+    if (session) stats[id] = usageSummary(session);
+  }
+  return json({ stats });
+}
+
+// POST /api/sessions/delete：项目分组的「删除全部会话」。正在运行的保留并报告，已经不在的也报告。
+async function sessionsDelete(request: MockRequest): Promise<Response> {
+  const ids = sessionIdsOf(await request.json());
+  if (!ids) return error("ids must be a non-empty list of session ids", 400);
+  const result: { deleted: string[]; missing: string[]; running: string[] } = { deleted: [], missing: [], running: [] };
+  for (const id of ids) {
+    const session = getSession(id);
+    if (!session) result.missing.push(id);
+    else if (session.live?.running) result.running.push(id);
+    else result.deleted.push(...deleteSession(id));
+  }
+  return json(result);
 }
 
 async function sessionsRoute(request: MockRequest): Promise<Response> {
   const [, , id, sub, entryId, leaf] = request.segments; // api / sessions / :id / ...
   if (!id) return json(sessionsPayload());
+  if (id === "ui-state") return sessionUiStateRoute(request);
+  if (id === "stats") return sessionsStats(request);
+  if (id === "delete") return sessionsDelete(request);
+  // 导入要读访问者本机的文件（import/pick 还要系统文件对话框），静态页面做不到。
+  if (id === "import") return error(demoOnlyMessage(), 501);
   if (id === "search") {
     const query = request.query("q") ?? "";
     if (query.length > 200) return error("Search query exceeds 200 characters", 400);
@@ -101,13 +146,34 @@ async function sessionsRoute(request: MockRequest): Promise<Response> {
     if (!block || block.type !== "thinking") return error("Thinking block not found", 404);
     return json({ thinking: block.thinking });
   }
-  if (sub === "export") return error(demoOnlyMessage(), 501);
+  if (sub === "fork") {
+    const body = await request.json<{ side?: boolean }>();
+    // 侧聊要带隐藏的边界消息和只读工具集（ADR 0007），演示里没有对应的运行时，给演示提示。
+    if (body.side === true) return error(demoOnlyMessage(), 501, { code: "failed" });
+    const forked = forkSession(session);
+    if (!forked.ok) return error(forked.message, 409, { code: forked.code });
+    return json({ sessionId: forked.session.id, session: sessionInfo(forked.session) });
+  }
+  // 导出、分享都要服务端生成文件或链接。
+  if (sub === "export" || sub === "share") return error(demoOnlyMessage(), 501);
   return error("Not found", 404);
 }
 
 async function agentRoute(request: MockRequest): Promise<Response> {
   const [, , id, sub] = request.segments;
-  if (id === "running") return json({ sessionListVersion: sessionListVersion(), runningSessionIds: runningSessionIds(), completionNotificationSuppressedSessionIds: [] });
+  if (id === "running") {
+    return json({
+      sessionListVersion: sessionListVersion(),
+      runningSessionIds: runningSessionIds(),
+      awaitingInputSessionIds: [],
+      completionNotificationSuppressedSessionIds: [],
+      // 演示里的子智能体都是已经跑完的教程数据，没有还能再起一轮的。
+      subagentsActiveSessionIds: [],
+      sessionUiStateRevision: sessionUiStateRevision(),
+    });
+  }
+  // 调试面板读的是真实服务器的连接、运行时和子进程登记，静态页面没有这些；面板会照常显示页面一侧的状态。
+  if (id === "debug") return error(demoOnlyMessage(), 501);
   if (id === "new") return json(createRuntimeSession(await request.json()));
   const session = getSession(id);
   if (sub === "lease") return json({ success: true, renewed: session ? 1 : 0 });
@@ -186,6 +252,8 @@ async function worktreesRoute(request: MockRequest): Promise<Response> {
 
 async function cwdRoute(request: MockRequest): Promise<Response> {
   const [, , action] = request.segments;
+  // 系统文件夹对话框（pick）和在目录选择器里新建文件夹（browse 的 POST）都要真的文件系统。
+  if (action === "pick" || (action === "browse" && request.method === "POST")) return error(demoOnlyMessage(), 501);
   if (action === "validate") {
     const body = await request.json<{ cwd?: string }>();
     const raw = (body.cwd ?? "").trim();
@@ -231,11 +299,19 @@ const ROUTES: Record<string, Handler> = {
   cwd: cwdRoute,
   home: () => json({ home: HOME }),
   "default-cwd": () => json({ cwd: SCRATCH_ROOT }),
-  "project-trust": () => json({ requiresTrust: false, trusted: true }),
+  mcp: mcpRoute,
+  "project-trust": (request) => (request.method === "GET"
+    ? json({ ...DEMO_PROJECT_TRUST, mcpServers: [] } satisfies ProjectTrustResponse)
+    // 信任决定要写服务器上的 trust.json；演示里没有需要信任的文件夹，用不到。
+    : error(demoOnlyMessage(), 501)),
   "app-update": () => {
     const version = process.env.NEXT_PUBLIC_APP_VERSION ?? "0.0.0";
-    return json({ currentVersion: version, latestVersion: version, updateAvailable: false, releaseUrl: `https://github.com/agegr/pi-web/releases/tag/v${version}` });
+    return json({ currentVersion: version, latestVersion: version, updateAvailable: false, releaseUrl: `https://github.com/tasselx/pi-web/releases/tag/v${version}` } satisfies AppUpdateResponse);
   },
+  // 只有服务器和浏览器在同一台机器上才能弹出文件管理器；演示页永远是远程的，客户端据此显示对应提示。
+  "open-in-explorer": (request) => (request.method === "GET"
+    ? json({ supported: false, reason: "remote", platform: "demo" })
+    : error(demoOnlyMessage(), 501)),
   git: async (request) => {
     const cwd = request.query("cwd") ?? "";
     if (request.segments[2] === "diff") return json(await gitDiff(request.query("path") ?? ""));

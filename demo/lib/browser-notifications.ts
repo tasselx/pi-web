@@ -1,3 +1,4 @@
+import { isBlockingExtensionUiRequest } from "./extension-ui-queue";
 import type { BlockingExtensionUiRequest, ExtensionUiRequest } from "./types";
 
 interface WindowNotificationLike {
@@ -32,21 +33,21 @@ export function shouldShowBrowserNotification(
   return attentionState.visibilityState !== "visible" || !attentionState.hasFocus();
 }
 
-export function isBlockingExtensionUiRequest(
-  request: ExtensionUiRequest,
-): request is BlockingExtensionUiRequest {
-  switch (request.method) {
-    case "select":
-    case "confirm":
-    case "input":
-    case "editor":
-      return true;
-    case "custom":
-      return request.closed !== true;
-    default:
-      return false;
+/** 浏览器通知的现状；`unsupported` 是这个页面根本用不了通知 API。 */
+export type NotificationState = NotificationPermission | "unsupported";
+
+export function getNotificationState(): NotificationState {
+  // 非安全上下文（http://局域网地址）里 Chrome 一律拒绝、Firefox 干脆没有 Notification；
+  // iOS 的普通网页标签页也没有它。对用户都是“这里用不了”，不是“被屏蔽”。
+  if (typeof window === "undefined" || !window.isSecureContext || !("Notification" in window)) {
+    return "unsupported";
   }
+  return Notification.permission;
 }
+
+// The classification lives with the request queues (lib/extension-ui-queue.ts),
+// where the server's awaiting-input snapshot shares it.
+export { isBlockingExtensionUiRequest };
 
 export function claimExtensionAttentionNotification(
   request: ExtensionUiRequest,

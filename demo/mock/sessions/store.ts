@@ -5,8 +5,9 @@
  */
 import type { AgentMessage, SessionContext, SessionEntry, SessionInfo } from "@/lib/types";
 import { normalizeToolCalls } from "@/lib/normalize";
-import { getThinkingPreview } from "@/lib/message-display";
-import { computeSessionStats } from "@/lib/session-stats";
+import { getThinkingPreview, isMessageGroupAnchor } from "@/lib/message-display";
+import { computeSessionStats, type SessionUsageSummary } from "@/lib/session-stats";
+import { forkSessionName, sessionDisplayTitle } from "@/lib/session-fork-name";
 import { computeSessionTotalActiveMs } from "@/lib/session-timing";
 import { projectTreeForResponse, toSummaryTree } from "@/lib/project-tree";
 import { readSessionToolSelectionFromEntries } from "./tool-selection";
@@ -112,16 +113,20 @@ export function addSession(session: MockSession): void {
   state.version += 1;
 }
 
-export function deleteSession(id: string): void {
+/** 返回实际删掉的 id（含随父会话一起删的子智能体会话）：批量删除接口要如实报告。 */
+export function deleteSession(id: string): string[] {
+  const removed = [id];
   state.sessions.delete(id);
   // Subagents are removed with their parent, like the real DELETE route.
   for (const session of state.sessions.values()) {
     if (session.relation?.kind === "subagent" && session.relation.parentSessionId === id) {
       state.sessions.delete(session.id);
+      removed.push(session.id);
     }
   }
   state.touched = true;
   state.version += 1;
+  return removed;
 }
 
 let entryCounter = 0x9000;
@@ -279,7 +284,7 @@ function entryToUiMessage(entry: SessionEntry, options: ContextOptions): AgentMe
   }
 }
 
-function sessionSettings(entries: SessionEntry[], leafId: string | null): Pick<SessionContext, "thinkingLevel" | "model"> {
+export function sessionSettings(entries: SessionEntry[], leafId: string | null): Pick<SessionContext, "thinkingLevel" | "model"> {
   const branch = sliceActiveBranch(entries, leafId, entries.length);
   let thinkingLevel: string | undefined;
   let changedModel: SessionContext["model"] | undefined;
@@ -296,10 +301,27 @@ function sessionSettings(entries: SessionEntry[], leafId: string | null): Pick<S
   return { thinkingLevel: thinkingLevel ?? "off", model: changedModel ?? responseModel ?? null };
 }
 
+/**
+ * 当前页第一条之前、没加载的轮数（主应用 session-reader 的 countTurnsBefore）：
+ * 聊天小地图按它给已加载的轮次编号，翻到更早的页之后编号不变。
+ */
+function countTurnsBefore(entries: SessionEntry[], oldest: SessionEntry): number {
+  const byId = new Map(entries.map((entry) => [entry.id, entry]));
+  let turns = 0;
+  let current = oldest.parentId ? byId.get(oldest.parentId) : undefined;
+  while (current) {
+    const message = entryToUiMessage(current, {});
+    if (message && isMessageGroupAnchor(message)) turns++;
+    current = current.parentId ? byId.get(current.parentId) : undefined;
+  }
+  return turns;
+}
+
 export function buildContext(session: MockSession, leafId: string | null | undefined, options: ContextOptions): SessionContext {
   const effectiveLeaf = leafId === undefined ? session.leafId : leafId;
   const tail = options.tail ?? 50;
   const sliced = sliceActiveBranch(session.entries, effectiveLeaf, tail, options.excludeLeaf);
+  const hasMore = Boolean(tail > 0 && sliced[0]?.parentId);
   const messages: AgentMessage[] = [];
   const entryIds: string[] = [];
   for (const entry of sliced) {
@@ -313,7 +335,8 @@ export function buildContext(session: MockSession, leafId: string | null | undef
     messages,
     entryIds,
     oldestEntryId: sliced[0]?.id ?? null,
-    hasMore: Boolean(tail > 0 && sliced[0]?.parentId),
+    hasMore,
+    turnsBefore: hasMore ? countTurnsBefore(session.entries, sliced[0]) : 0,
     ...sessionSettings(session.entries, effectiveLeaf),
   };
 }
@@ -372,4 +395,50 @@ export function sessionDetail(session: MockSession, params: URLSearchParams) {
     totalActiveMs: computeSessionTotalActiveMs(session.entries),
     ...(toolNames !== undefined ? { toolNames } : {}),
   };
+}
+
+/** 智能体切换器每一行的用量（POST /api/sessions/stats）：和主应用同一套聚合，只是读内存里的条目。 */
+export function usageSummary(session: MockSession): SessionUsageSummary {
+  const stats = computeSessionStats(session.entries);
+  return {
+    tokens: stats.tokens,
+    cost: stats.cost,
+    toolCalls: stats.toolCalls,
+    totalActiveMs: computeSessionTotalActiveMs(session.entries),
+    ...sessionSettings(session.entries, session.leafId),
+  };
+}
+
+export type ForkResult =
+  | { ok: true; session: MockSession }
+  | { ok: false; code: "unsaved" | "empty" | "subagent" | "side"; message: string };
+
+/**
+ * 侧栏的 Fork（app/api/sessions/[id]/fork）：把当前分支复制成一个新会话，
+ * 名字是源会话的标题加 4 位十六进制后缀。拒绝码与主应用一致，客户端按码翻译提示。
+ */
+export function forkSession(source: MockSession): ForkResult {
+  if (source.transient) return { ok: false, code: "unsaved", message: "This session has not been saved yet. Send a message before forking it." };
+  if (source.relation?.kind === "subagent") return { ok: false, code: "subagent", message: "A subagent session cannot be forked" };
+  if (source.relation?.kind === "side") return { ok: false, code: "side", message: "A side chat cannot be forked" };
+  // tail 取条目总数：沿父链一直走到根，复制整条当前分支。
+  const branch = source.leafId ? sliceActiveBranch(source.entries, source.leafId, source.entries.length) : [];
+  if (branch.length === 0) return { ok: false, code: "empty", message: "Nothing to fork: the session has no messages" };
+
+  const suffix = Math.floor(Math.random() * 0x10000).toString(16).padStart(4, "0");
+  const copy: MockSession = {
+    id: randomUuid(),
+    cwd: source.cwd,
+    created: new Date().toISOString(),
+    name: forkSessionName(sessionDisplayTitle(sessionInfo(source)), suffix, source.relation?.kind === "fork"),
+    relation: { kind: "fork", originSessionId: source.id },
+    parentSessionId: source.id,
+    // 条目 id 原样保留（和 pi 的 Fork 一样），用深拷贝免得两个会话共用同一批对象。
+    entries: branch.map((entry) => structuredClone(entry)),
+    leafId: source.leafId,
+    transient: false,
+    live: null,
+  };
+  addSession(copy);
+  return { ok: true, session: copy };
 }

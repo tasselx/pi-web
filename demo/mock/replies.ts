@@ -21,7 +21,7 @@ export interface ReplyPlan {
   };
 }
 
-const INSTALL = "npx @agegr/pi-web@latest";
+const INSTALL = "npx @tasselx/pi-web@latest";
 
 function modelName(session: MockSession): string {
   const model = session.live?.model;

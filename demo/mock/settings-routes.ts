@@ -4,14 +4,22 @@
  * anything that would install software or contact a provider is refused with
  * a demo notice.
  */
+import type {
+  PluginStandaloneExtensionInfo,
+  PluginsResponse,
+  SkillContentResponse,
+  SkillToggleResult,
+  SleepInhibitStatus,
+  ToolSettingsResponse,
+} from "@/lib/api-types";
 import skillsResponse from "./captured/skills.json";
 import subagentProfilesResponse from "./captured/subagent-profiles.json";
 import type { MockRequest } from "./http";
 import { delay, error, json } from "./http";
-import { currentDemoLocale } from "./locale";
+import { currentDemoLocale, pick } from "./locale";
 import { AUTH_PROVIDERS_RESPONSE, ENABLED_MODELS_RESPONSE, MODELS_CONFIG, MODELS_RESPONSE, MODEL_PRICING } from "./data/models";
-import { PLUGINS_RESPONSE, SKILL_SEARCH_RESULTS } from "./data/extensions";
-import { settings } from "./settings-state";
+import { PLUGINS_RESPONSE, SKILL_DOCUMENTS, SKILL_SEARCH_RESULTS } from "./data/extensions";
+import { CODEMODE_INLINE_BUDGET_MAX, settings } from "./settings-state";
 import { demoOnlyMessage } from "./unavailable";
 
 type EnabledView = typeof ENABLED_MODELS_RESPONSE;
@@ -217,18 +225,45 @@ export function usageReport(providerId: string) {
   return { providerId, status: "auth-unavailable", message: demoOnlyMessage() };
 }
 
+/** 切换一个示例 skill 的 disable-model-invocation；找不到时报错但不牵连批量里的其他项。 */
+function toggleSkill(filePath: string, disabled: boolean): SkillToggleResult {
+  const skill = skillsState.skills.find((candidate) => candidate.filePath === filePath);
+  if (!skill) return { filePath, error: "file not found" };
+  skill.disableModelInvocation = disabled;
+  return { filePath };
+}
+
+// GET /api/skills/content：示例 skill 的 SKILL.md。同目录里被相对链接指到的其他文档，演示里没有。
+function skillContent(request: MockRequest): Response {
+  const filePath = request.query("filePath");
+  if (!request.query("cwd")) return error("cwd required", 400);
+  if (!filePath) return error("filePath required", 400);
+  const skill = skillsState.skills.find((candidate) => candidate.filePath === filePath);
+  if (!skill) return error("Skill not found", 404);
+  if (request.query("document") !== null) return error("Skill document not found", 404);
+  return json({ content: pick(SKILL_DOCUMENTS[skill.filePath], currentDemoLocale()) } satisfies SkillContentResponse);
+}
+
 async function skillsRoute(request: MockRequest): Promise<Response> {
   const sub = request.segments[2];
   if (!sub) {
     if (request.method === "PATCH") {
-      const body = await request.json<{ filePath?: string; disableModelInvocation?: boolean }>();
-      const skill = skillsState.skills.find((candidate) => candidate.filePath === body.filePath);
-      if (!skill) return error("file not found", 404);
-      skill.disableModelInvocation = Boolean(body.disableModelInvocation);
-      return json({ success: true });
+      const body = await request.json<{ filePath?: string; filePaths?: unknown; disableModelInvocation?: unknown }>();
+      const disabled = Boolean(body.disableModelInvocation);
+      // 「全部启用 / 全部禁用」：每个文件各自处理并逐个报告，和主应用一样。
+      const filePaths = body.filePaths;
+      if (filePaths !== undefined) {
+        if (!Array.isArray(filePaths) || !filePaths.every((item) => typeof item === "string" && item)) return error("filePaths must be a list of paths", 400);
+        if (typeof body.disableModelInvocation !== "boolean") return error("disableModelInvocation must be a boolean", 400);
+        return json({ results: [...new Set<string>(filePaths)].map((filePath) => toggleSkill(filePath, disabled)) });
+      }
+      if (!body.filePath) return error("filePath required", 400);
+      const result = toggleSkill(body.filePath, disabled);
+      return result.error ? error(result.error, 404) : json({ success: true });
     }
     return json(skillsState);
   }
+  if (sub === "content") return skillContent(request);
   if (sub === "search") {
     await delay(700);
     const body = await request.json<{ query?: string }>();
@@ -240,12 +275,36 @@ async function skillsRoute(request: MockRequest): Promise<Response> {
   return error(demoOnlyMessage(), 501);
 }
 
+/** 设置 › 插件的列表：示例插件包，加上 pi 自带的内置扩展行（没有文件，路径就是 builtin:<name>）。 */
+function pluginsResponse(): PluginsResponse {
+  const builtins = Object.entries(settings.builtinExtensions).map(([name, enabled]): PluginStandaloneExtensionInfo => ({
+    kind: "extension",
+    name: `builtin:${name}`,
+    path: `builtin:${name}`,
+    relativePath: `builtin:${name}`,
+    scope: "global",
+    enabled,
+    builtin: true,
+  }));
+  return { ...PLUGINS_RESPONSE, standaloneExtensions: builtins };
+}
+
 async function pluginsRoute(request: MockRequest): Promise<Response> {
   if (request.segments[2] === "check") {
     await delay(800);
     return json({ results: PLUGINS_RESPONSE.packages.map((pkg) => ({ source: pkg.source, scope: pkg.scope, displayName: pkg.packageName ?? pkg.source, type: "npm", state: "up-to-date" })) });
   }
-  if (request.method === "GET") return json(PLUGINS_RESPONSE);
+  if (request.method === "GET") return json(pluginsResponse());
+  const body = await request.json<{ action?: string; name?: unknown; enabled?: unknown }>();
+  // 内置扩展的开关只是改内存里的一个标记，演示里真的能生效（设置 › MCP 也跟着变）。
+  if (body.action === "set-builtin") {
+    const name = body.name;
+    if (typeof name !== "string" || !Object.keys(settings.builtinExtensions).includes(name)) return error("name must be a built-in extension", 400);
+    if (typeof body.enabled !== "boolean") return error("enabled required", 400);
+    settings.builtinExtensions[name] = body.enabled;
+    return json(pluginsResponse());
+  }
+  // 安装、卸载、更新、启用/停用插件包要联网装软件、改磁盘，演示里做不到。
   await delay(500);
   return error(demoOnlyMessage(), 501);
 }
@@ -282,6 +341,76 @@ async function subagentsRoute(request: MockRequest): Promise<Response> {
   return error("Not found", 404);
 }
 
+function toolSettings(): ToolSettingsResponse {
+  return {
+    isWindows: false,
+    powerShellEnabled: settings.powerShellEnabled,
+    codemode: settings.codemode,
+    codemodeMode: settings.codemodeMode,
+    codemodeInlineBudget: settings.codemodeInlineBudget,
+  };
+}
+
+const TOOL_SETTING_KEYS = ["enabled", "codemode", "codemodeMode", "codemodeInlineBudget"] as const;
+
+// PUT /api/tools/settings：和主应用一样一次只改一项，改完回完整设置；存在内存里。
+async function toolSettingsRoute(request: MockRequest): Promise<Response> {
+  if (request.method !== "PUT") return json(toolSettings());
+  const changes = await request.json();
+  const invalid = (message: string) => error(message, 400, { reason: "invalid-request" });
+  if (TOOL_SETTING_KEYS.filter((key) => key in changes).length !== 1) {
+    return invalid("Send one of enabled (PowerShell), codemode, codemodeMode or codemodeInlineBudget");
+  }
+  if ("codemodeMode" in changes) {
+    const mode = changes.codemodeMode;
+    if (mode !== "on" && mode !== "only") return invalid('codemodeMode must be "on" or "only"');
+    settings.codemodeMode = { value: mode };
+  } else if ("codemodeInlineBudget" in changes) {
+    // null 表示去掉这个键，会话回到 pi 的默认值。
+    const budget = changes.codemodeInlineBudget;
+    if (budget === null) settings.codemodeInlineBudget = {};
+    else if (typeof budget === "number" && Number.isInteger(budget) && budget >= 0 && budget <= CODEMODE_INLINE_BUDGET_MAX) settings.codemodeInlineBudget = { value: budget };
+    else return invalid(`codemodeInlineBudget must be a whole number from 0 to ${CODEMODE_INLINE_BUDGET_MAX}, or null`);
+  } else if ("codemode" in changes) {
+    const preference = changes.codemode;
+    if (preference !== "automatic" && preference !== "always") return invalid('codemode must be "automatic" or "always"');
+    settings.codemode = preference;
+  } else {
+    // PowerShell 开关只在 Windows 上有；演示里的「这台机器」不是。
+    return error("PowerShell tool settings are only available on Windows", 404, { reason: "invalid-request" });
+  }
+  return json(toolSettings());
+}
+
+// 设置 › 常规的缓存/费用提示开关。
+async function cacheMissNoticesRoute(request: MockRequest): Promise<Response> {
+  if (request.method === "PUT") {
+    const { enabled } = await request.json();
+    if (typeof enabled !== "boolean") return error("enabled must be a boolean", 400);
+    settings.cacheMissNotices = enabled;
+  }
+  return json({ enabled: settings.cacheMissNotices });
+}
+
+// 「运行时防止系统休眠」要由跑 agent 的那台主机去持有；演示页没有这样的主机，
+// 所以按「这台机器不支持」回答：面板显示原因、开关不可用，和真实服务器遇到不支持的系统时一样。
+async function sleepInhibitRoute(request: MockRequest): Promise<Response> {
+  const status: SleepInhibitStatus = {
+    enabled: false,
+    supported: false,
+    unsupportedReason: pick({
+      en: "This is a static demo: there is no host running agents that could be kept awake.",
+      zh: "这是静态演示，没有正在运行智能体、可以被保持唤醒的主机。",
+    }, currentDemoLocale()),
+    active: false,
+  };
+  if (request.method !== "PUT") return json(status);
+  const { enabled } = await request.json();
+  if (typeof enabled !== "boolean") return error("enabled must be a boolean", 400);
+  // 不支持的机器上「开」被拒绝（带上状态），「关」照常接受。
+  return enabled ? json({ ...status, error: status.unsupportedReason }, 409) : json(status);
+}
+
 export async function settingsRoutes(request: MockRequest): Promise<Response> {
   switch (request.segments[1]) {
     case "models": return modelsRoute(request);
@@ -295,10 +424,9 @@ export async function settingsRoutes(request: MockRequest): Promise<Response> {
     case "skills": return skillsRoute(request);
     case "plugins": return pluginsRoute(request);
     case "subagents": return subagentsRoute(request);
-    case "tools": {
-      if (request.method === "PUT") return error("PowerShell tool settings are only available on Windows", 404);
-      return json({ isWindows: false, powerShellEnabled: settings.powerShellEnabled });
-    }
+    case "tools": return request.segments[2] === "settings" ? toolSettingsRoute(request) : error(`Not found: ${request.path}`, 404);
+    case "cache-miss-notices": return cacheMissNoticesRoute(request);
+    case "sleep-inhibit": return sleepInhibitRoute(request);
     case "web-auth":
       return request.method === "GET" ? json({ enabled: false, authenticated: true }) : json({ ok: true });
     default:

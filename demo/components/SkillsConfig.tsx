@@ -1,52 +1,74 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useId, useLayoutEffect, useRef } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import type {
+  SkillContentResponse,
   SkillInfo as Skill,
   SkillInstallScope,
+  SkillRemoveResponse,
+  SkillRestoreResponse,
   SkillSearchResult,
   SkillsResponse,
+  SkillToggleResult,
   SkillUpdateResult,
+  ProjectTrustStatus,
 } from "@/lib/api-types";
+import { displayPathWithin, shortenPath } from "@/lib/display-path";
+import { parseFrontmatter } from "@/lib/frontmatter";
 import {
   getLastSettingsSelection,
   setLastSettingsSelection,
 } from "@/lib/settings-navigation";
+import { focusIfLost } from "@/lib/stacked-dialog";
 import {
+  ConfigAddSourceHeading,
   ConfigButton,
   ConfigDetail,
   ConfigDetailActions,
   ConfigDetailHeader,
   ConfigDetailHeaderInfo,
   ConfigDetailStack,
-  ConfigDetailTitle,
   ConfigEmptyState,
   ConfigField,
   ConfigFooter,
   ConfigListAction,
+  ConfigNotice,
   ConfigPanelShell,
+  ConfigSaveTarget,
+  ConfigScopeTag,
   ConfigSidebar,
   ConfigSidebarGroupLabel,
+  ConfigSidebarGroupStatus,
+  ConfigSidebarGroupSwitch,
   ConfigSidebarItem,
   ConfigSidebarList,
   ConfigSidebarText,
   ConfigSplitView,
   ConfigStatusDot,
   ConfigSwitch,
+  ConfigTrustNotice,
 } from "./SettingsUi";
+import { itemsToSwitch, projectTrustReloadKey } from "./settings-ui-helpers";
+import { MarkdownBody } from "./MarkdownBody";
+import { UploadIcon } from "./SidebarIcons";
+import { ImportSkillDialog } from "./ImportSkillDialog";
 
-function shortenPath(p: string): string {
-  // Match common home dir patterns: /Users/xxx, /home/xxx
-  return p.replace(/^\/(?:Users|home)\/[^/]+/, "~");
-}
+type SkillScope = "global" | "project" | "path";
+type Translate = ReturnType<typeof useI18n>["t"];
 
-function sourceLabel(skill: Skill): string {
+function sourceLabel(skill: Skill): SkillScope {
   const src = skill.sourceInfo?.source;
   const scope = skill.sourceInfo?.scope;
   if (scope === "user" || src === "user") return "global";
   if (scope === "project" || src === "project") return "project";
   return "path";
+}
+
+function scopeLabel(scope: SkillScope, t: Translate): string {
+  if (scope === "project") return t("skills.scope.project");
+  if (scope === "global") return t("skills.scope.global");
+  return t("skills.scope.path");
 }
 
 export function orderSkillsByDormancy<
@@ -58,14 +80,57 @@ export function orderSkillsByDormancy<
   ];
 }
 
+/**
+ * The skills a group switch would change: those of the group not already in
+ * the requested state.
+ */
+export function skillsToSwitch<
+  T extends Pick<Skill, "disableModelInvocation">,
+>(skills: T[], enabled: boolean): T[] {
+  return itemsToSwitch(skills, enabled, (skill) => !skill.disableModelInvocation);
+}
+
+/** Applies a bulk toggle's results; a skill whose file reported an error keeps its state. */
+export function applySkillToggleResults<
+  T extends Pick<Skill, "filePath" | "disableModelInvocation">,
+>(skills: T[], results: SkillToggleResult[], disableModelInvocation: boolean): T[] {
+  const changed = new Set(results.filter((result) => !result.error).map((result) => result.filePath));
+  return skills.map((skill) =>
+    changed.has(skill.filePath) ? { ...skill, disableModelInvocation } : skill,
+  );
+}
+
 function updateKey(skill: Skill): string | null {
   return skill.install
     ? `${skill.install.scope}\0${skill.install.package}`
     : null;
 }
 
-function shortVersion(version?: string): string {
-  return version ? version.slice(0, 8) : "unknown";
+function shortVersion(version: string | undefined, unknown: string): string {
+  return version ? version.slice(0, 8) : unknown;
+}
+
+export function skillInstructionsBody(content: string): string {
+  return parseFrontmatter(content).rest.trim();
+}
+
+/**
+ * A link in a skill document: a path in the skill folder, from the linking
+ * document's folder as pi resolves a skill's relative paths, and a heading.
+ * An absolute path or a `..` past the folder stays, for the route to refuse.
+ */
+export function resolveSkillLink(href: string, fromDocument: string): { document: string; anchor: string } {
+  const hash = href.indexOf("#");
+  const [linkPath, anchor] = [hash < 0 ? href : href.slice(0, hash), hash < 0 ? "" : href.slice(hash + 1)]
+    .map((part) => { try { return decodeURIComponent(part); } catch { return part; } });
+  if (!linkPath) return { document: fromDocument, anchor };
+  if (linkPath.startsWith("/")) return { document: linkPath, anchor };
+  const parts = fromDocument.split("/").slice(0, -1);
+  for (const part of linkPath.split("/")) {
+    if (part === ".." && parts.length && parts[parts.length - 1] !== "..") parts.pop();
+    else if (part && part !== ".") parts.push(part);
+  }
+  return { document: parts.join("/"), anchor };
 }
 
 function SkillDetail({
@@ -74,6 +139,8 @@ function SkillDetail({
   onToggle,
   toggling,
   saveError,
+  removing,
+  onRemove,
   updateStatus,
   checkingUpdate,
   updating,
@@ -86,6 +153,10 @@ function SkillDetail({
   onToggle: (skill: Skill) => void;
   toggling: boolean;
   saveError: string | null;
+  /** A removal is on its way somewhere in the panel. */
+  removing: boolean;
+  /** Removes the skill; answers the failure to show, or null (the panel then reloads and this pane goes). */
+  onRemove: (skill: Skill) => Promise<string | null>;
   updateStatus?: SkillUpdateResult;
   checkingUpdate: boolean;
   updating: boolean;
@@ -96,14 +167,71 @@ function SkillDetail({
   const { t } = useI18n();
   const label = sourceLabel(skill);
   const enabled = !skill.disableModelInvocation;
+  const displayPath = (path: string) => (label === "project" ? displayPathWithin(path, cwd) : shortenPath(path));
+  const { removal } = skill;
+  // 确认放在本窗格里（切换技能时随窗格一起重置）；服务端算不出移除方式的技能（插件、settings 里的路径）没有 removal
+  const [confirmingRemove, setConfirmingRemove] = useState(false);
+  const [removeError, setRemoveError] = useState<string | null>(null);
+  const removeNoteId = useId();
+  // 目录遵循通用的 .agents/skills 约定时，别的工具（Cursor、Claude Code……）可能也在读它
+  const sharedFolder = /[\\/]\.agents[\\/]skills[\\/]/.test(skill.filePath);
+  const confirmRemove = async () => {
+    setRemoveError(null);
+    const failure = await onRemove(skill);
+    // 成功时面板会重新加载列表，本窗格随之卸载；只有失败才留在这里
+    if (failure) setRemoveError(failure);
+  };
+  const [instructions, setInstructions] = useState<string | null>(null);
+  const [instructionsError, setInstructionsError] = useState<string | null>(null);
+  // Documents opened from the instructions' links; the last one shows.
+  const rootDocument = skill.filePath.split(/[\\/]/).pop()!;
+  const [documents, setDocuments] = useState<string[]>([]);
+  const documentPath = documents.at(-1) ?? rootDocument;
+  const instructionsRef = useRef<HTMLDivElement>(null);
+  // The heading to bring into view once its document shows; "" is the top.
+  const pendingAnchor = useRef<string | null>(null);
+  const [anchorRequest, setAnchorRequest] = useState(0);
 
-  function displayPath(p: string): string {
-    if (label === "project" && p.startsWith(cwd)) {
-      const rel = p.slice(cwd.length).replace(/^[/\\]/, "");
-      return `./${rel}`;
-    }
-    return shortenPath(p);
-  }
+  const openLink = useCallback((href: string) => {
+    const link = resolveSkillLink(href, documentPath);
+    pendingAnchor.current = link.anchor;
+    if (link.document === documentPath) setAnchorRequest((request) => request + 1);
+    else setDocuments((open) => [...open, link.document]);
+  }, [documentPath]);
+
+  useLayoutEffect(() => {
+    const anchor = pendingAnchor.current;
+    const root = instructionsRef.current;
+    if (anchor === null || (instructions === null && !instructionsError) || !root) return;
+    pendingAnchor.current = null;
+    const heading = anchor ? root.querySelector(`[data-heading-anchor="${CSS.escape(anchor)}"]`) : null;
+    (heading ?? root).scrollIntoView({ block: "start" });
+  }, [instructions, instructionsError, anchorRequest]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setInstructions(null);
+    setInstructionsError(null);
+
+    const load = async () => {
+      try {
+        const params = new URLSearchParams({ cwd, filePath: skill.filePath });
+        if (documentPath !== rootDocument) params.set("document", documentPath);
+        const response = await fetch(`/api/skills/content?${params}`, { signal: controller.signal });
+        const data = (await response.json()) as Partial<SkillContentResponse> & { error?: string };
+        if (!response.ok || data.error || typeof data.content !== "string") {
+          throw new Error(data.error ?? `HTTP ${response.status}`);
+        }
+        setInstructions(skillInstructionsBody(data.content));
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        setInstructionsError(error instanceof Error ? error.message : String(error));
+      }
+    };
+
+    void load();
+    return () => controller.abort();
+  }, [cwd, skill.filePath, documentPath, rootDocument]);
 
   return (
     <ConfigDetailStack>
@@ -111,14 +239,24 @@ function SkillDetail({
       <div className="skill-detail-heading">
         <ConfigDetailHeader>
           <ConfigDetailHeaderInfo>
-            <span className={`config-scope-tag${label === "project" ? " is-project" : ""}`}>
-              {label}
-            </span>
+            <ConfigScopeTag scope={label}>{scopeLabel(label, t)}</ConfigScopeTag>
             <span className="config-detail-path">
               {displayPath(skill.filePath)}
             </span>
           </ConfigDetailHeaderInfo>
           <ConfigDetailActions>
+            <ConfigButton
+              variant="danger"
+              size="small"
+              disabled={!removal || removing || confirmingRemove}
+              aria-describedby={removal ? undefined : removeNoteId}
+              onClick={() => {
+                setRemoveError(null);
+                setConfirmingRemove(true);
+              }}
+            >
+              {t("i18n.remove")}
+            </ConfigButton>
             <ConfigSwitch
               checked={enabled}
               loading={toggling}
@@ -138,11 +276,34 @@ function SkillDetail({
               {saveError}
             </span>
           )}
+          {removeError && (
+            <span role="alert" style={{ fontSize: 12, color: "#f87171", overflowWrap: "anywhere" }}>
+              {removeError}
+            </span>
+          )}
         </div>
+        {/* 不能移除的原因写成可见文字，不只放在提示气泡里 */}
+        {!removal && <div id={removeNoteId} className="config-detail-heading-note">{t("skills.removeUnavailable")}</div>}
+        {confirmingRemove && removal && (
+          <div className="skill-remove-confirm">
+            <span className="skill-remove-confirm-text">
+              {removal.method === "cli"
+                ? t("skills.removeConfirmCli", { name: skill.name, path: displayPath(removal.path) })
+                : t("skills.removeConfirmFiles", { path: displayPath(removal.path) })}
+              {sharedFolder && <> {t("skills.removeConfirmShared")}</>}
+            </span>
+            <ConfigButton size="small" onClick={() => setConfirmingRemove(false)} disabled={removing}>
+              {t("i18n.cancel")}
+            </ConfigButton>
+            <ConfigButton variant="danger" size="small" onClick={() => void confirmRemove()} disabled={removing}>
+              {removing ? t("i18n.removing") : t("i18n.remove")}
+            </ConfigButton>
+          </div>
+        )}
       </div>
 
       {skill.install?.skillsShUrl && (
-        <ConfigField label="Source">
+        <ConfigField label={t("config.source")}>
           <a
             href={skill.install.skillsShUrl}
             target="_blank"
@@ -158,10 +319,10 @@ function SkillDetail({
       )}
 
       {skill.install && (
-        <ConfigField label="Version">
+        <ConfigField label={t("i18n.version")}>
           <div className="skill-version-row">
             <span className="skill-version-value">
-              {shortVersion(updateStatus?.currentVersion ?? skill.install.versionHash)}
+              {shortVersion(updateStatus?.currentVersion ?? skill.install.versionHash, t("i18n.unknown"))}
             </span>
             {skill.install.canCheckForUpdates && (
               <ConfigButton
@@ -174,7 +335,7 @@ function SkillDetail({
             )}
             {updateStatus?.state === "update-available" && (
               <span className="skill-version-value is-update">
-                {shortVersion(updateStatus.latestVersion)}
+                {shortVersion(updateStatus.latestVersion, t("i18n.unknown"))}
               </span>
             )}
             {(checkingUpdate ||
@@ -214,16 +375,40 @@ function SkillDetail({
         </ConfigField>
       )}
 
-      <ConfigField label="Name">
+      <ConfigField label={t("config.name")}>
         <span className="skill-name-value">
           {skill.name}
         </span>
       </ConfigField>
 
-      <ConfigField label="Description">
+      <ConfigField label={t("i18n.description")}>
         <span className="skill-description">
           {skill.description}
         </span>
+      </ConfigField>
+
+      <ConfigField label={t("skills.instructions")} ref={instructionsRef}>
+        {documents.length > 0 && (
+          <ConfigDetailHeader>
+            <ConfigDetailHeaderInfo>
+              <ConfigButton size="small" onClick={() => { pendingAnchor.current = ""; setDocuments((open) => open.slice(0, -1)); }}>
+                {t("skills.documentBack")}
+              </ConfigButton>
+              <span className="config-detail-path" title={documentPath}>{documentPath}</span>
+            </ConfigDetailHeaderInfo>
+          </ConfigDetailHeader>
+        )}
+        {instructionsError ? (
+          <span role="alert" className="skill-instructions-status is-error">{instructionsError}</span>
+        ) : instructions === null ? (
+          <span role="status" className="skill-instructions-status">{t("i18n.loading")}</span>
+        ) : instructions ? (
+          <MarkdownBody className="skill-instructions" cwd={[skill.baseDir, ...documentPath.split("/").slice(0, -1)].join("/")} onNavigateLink={openLink}>
+            {instructions}
+          </MarkdownBody>
+        ) : (
+          <span className="skill-instructions-status">{t("skills.noInstructions")}</span>
+        )}
       </ConfigField>
     </ConfigDetailStack>
   );
@@ -234,11 +419,13 @@ function AddSkillPanel({
   installedPackages,
   projectResourcesLoaded,
   onInstalled,
+  onImported,
 }: {
   cwd: string;
   installedPackages: Record<SkillInstallScope, ReadonlySet<string>>;
   projectResourcesLoaded: boolean;
   onInstalled: () => void;
+  onImported: (result: { filePath: string }) => void;
 }) {
   const { t } = useI18n();
   const [query, setQuery] = useState("");
@@ -251,6 +438,7 @@ function AddSkillPanel({
     new Set(),
   );
   const [scope, setScope] = useState<"global" | "project">("global");
+  const [importOpen, setImportOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -277,13 +465,13 @@ function AddSkillPanel({
         return;
       }
       setResults(d.results ?? []);
-      if ((d.results ?? []).length === 0) setSearchError("No skills found");
+      if ((d.results ?? []).length === 0) setSearchError(t("i18n.noSkills"));
     } catch (e) {
       setSearchError(String(e));
     } finally {
       setSearching(false);
     }
-  }, []);
+  }, [t]);
 
   const install = useCallback(
     async (pkg: string) => {
@@ -317,6 +505,7 @@ function AddSkillPanel({
     scope === "global"
       ? "~/.pi/agent/skills/"
       : `${shortenPath(cwd)}/.pi/skills/`;
+  const importLabel = t("skills.import.importToScope", { scope: scopeLabel(scope, t) });
 
   return (
     <ConfigDetailStack className="is-full-height">
@@ -329,7 +518,34 @@ function AddSkillPanel({
           marginBottom: 20,
         }}
       >
-        <ConfigDetailTitle>{t("i18n.addSkill")}</ConfigDetailTitle>
+        <ConfigAddSourceHeading
+          title={t("i18n.addSkill")}
+          catalogs={[{ href: "https://skills.sh", label: "skills.sh" }]}
+          target={
+            <ConfigSaveTarget
+              value={scope}
+              label={t("config.saveTo")}
+              options={[
+                { value: "global", label: scopeLabel("global", t) },
+                { value: "project", label: scopeLabel("project", t), disabled: !projectResourcesLoaded },
+              ]}
+              path={installPath}
+              disabledReason={t("trust.projectScopeUnavailable")}
+              onChange={setScope}
+              // 导入入口紧挨「全局 | 项目」：导入到哪里，由当前选中的范围决定
+              aside={
+                <ConfigButton
+                  size="small"
+                  title={importLabel}
+                  aria-label={importLabel}
+                  onClick={() => setImportOpen(true)}
+                >
+                  <UploadIcon size={13} />
+                </ConfigButton>
+              }
+            />
+          }
+        />
 
         {/* Search row */}
         <div style={{ display: "flex", gap: 8 }}>
@@ -361,56 +577,6 @@ function AddSkillPanel({
           </ConfigButton>
         </div>
 
-        {/* Scope + install path row */}
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <div
-            style={{
-              display: "flex",
-              borderRadius: 5,
-              border: "1px solid var(--border)",
-              overflow: "hidden",
-              fontSize: 12,
-              flexShrink: 0,
-            }}
-          >
-            {(["global", "project"] as const).map((s) => (
-              <button
-                key={s}
-                onClick={() => {
-                  if (s === "global" || projectResourcesLoaded) setScope(s);
-                }}
-                disabled={s === "project" && !projectResourcesLoaded}
-                title={s === "project" && !projectResourcesLoaded ? t("trust.projectScopeUnavailable") : undefined}
-                style={{
-                  padding: "3px 10px",
-                  border: "none",
-                  cursor: s === "project" && !projectResourcesLoaded ? "not-allowed" : "pointer",
-                  background: scope === s ? "var(--bg-selected)" : "none",
-                  color: scope === s ? "var(--text)" : "var(--text-dim)",
-                  fontWeight: scope === s ? 600 : 400,
-                  opacity: s === "project" && !projectResourcesLoaded ? 0.45 : 1,
-                  borderRight:
-                    s === "global" ? "1px solid var(--border)" : "none",
-                }}
-              >
-                {s}
-              </button>
-            ))}
-          </div>
-          <span
-            style={{
-              fontSize: 12,
-              color: "var(--text-dim)",
-              fontFamily: "var(--font-mono)",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
-            → {installPath}
-          </span>
-        </div>
-
         {/* Errors */}
         {searchError && (
           <div style={{ fontSize: 12, color: "#f87171" }}>{searchError}</div>
@@ -425,7 +591,7 @@ function AddSkillPanel({
       </div>
 
       {/* ── Results list ── */}
-      {results.length > 0 ? (
+      {results.length > 0 && (
         <div style={{ flex: 1, overflowY: "auto" }}>
           {results.map((r) => {
             const isInstalled =
@@ -528,24 +694,19 @@ function AddSkillPanel({
             );
           })}
         </div>
-      ) : (
-        !searchError &&
-        !searching && (
-          <div
-            style={{ fontSize: 13, color: "var(--text-dim)", lineHeight: 1.8 }}
-          >
-            Search{" "}
-            <a
-              href="https://skills.sh"
-              target="_blank"
-              rel="noreferrer"
-              style={{ color: "var(--accent)", textDecoration: "none" }}
-            >
-              skills.sh
-            </a>{" "}
-            to discover and install skills for your agent.
-          </div>
-        )
+      )}
+
+      {importOpen && (
+        <ImportSkillDialog
+          cwd={cwd}
+          scope={scope}
+          targetRoot={installPath}
+          onClose={() => setImportOpen(false)}
+          onImported={(result) => {
+            setImportOpen(false);
+            onImported(result);
+          }}
+        />
       )}
     </ConfigDetailStack>
   );
@@ -555,10 +716,13 @@ export function SkillsConfig({
   cwd,
   onClose,
   embedded = false,
+  trust,
 }: {
   cwd: string;
   onClose: () => void;
   embedded?: boolean;
+  /** The page's trust status for `cwd`; a new decision loads the list again. */
+  trust?: ProjectTrustStatus | null;
 }) {
   const { t } = useI18n();
   const [skills, setSkills] = useState<Skill[]>([]);
@@ -567,6 +731,9 @@ export function SkillsConfig({
   const [selected, setSelected] = useState<string | null>(() => getLastSettingsSelection("skills", cwd));
   const [toggling, setToggling] = useState<Set<string>>(new Set());
   const [saveError, setSaveError] = useState<string | null>(null);
+  // The group switch that is running, and what the last one left undone.
+  const [bulkGroup, setBulkGroup] = useState<string | null>(null);
+  const [groupStatus, setGroupStatus] = useState<{ group: string; error: string } | null>(null);
   const [addMode, setAddMode] = useState(false);
   const [updateStatuses, setUpdateStatuses] = useState<Record<string, SkillUpdateResult>>({});
   const [checkingUpdates, setCheckingUpdates] = useState<Set<string>>(new Set());
@@ -574,6 +741,17 @@ export function SkillsConfig({
   const [updatingSkill, setUpdatingSkill] = useState<string | null>(null);
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [projectResourcesLoaded, setProjectResourcesLoaded] = useState(true);
+  // 一次只做一个移除；失败的原因由详情页自己显示
+  const [removing, setRemoving] = useState(false);
+  // 刚移除的那个技能：服务端留着它 60 秒，浏览器只拿到令牌，撤销靠它
+  const [removed, setRemoved] = useState<{
+    token: string;
+    name: string;
+    expiresInMs: number;
+    undoing: boolean;
+    error: string | null;
+  } | null>(null);
+  const undoButtonRef = useRef<HTMLButtonElement>(null);
 
   const loadSkills = useCallback(async () => {
     setLoading(true);
@@ -604,6 +782,18 @@ export function SkillsConfig({
     setUpdateError(null);
     void loadSkills();
   }, [cwd]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Whether the project's skills load follows its trust, which can change while
+  // this section stays mounted (hidden) in Settings: trusting from Settings ›
+  // MCP. A new decision loads the list again in place, keeping the selection and
+  // any update checks; the first load is the effect above.
+  const trustKey = projectTrustReloadKey(trust);
+  const loadedTrustKeyRef = useRef(trustKey);
+  useEffect(() => {
+    if (loadedTrustKeyRef.current === trustKey) return;
+    loadedTrustKeyRef.current = trustKey;
+    void loadSkills();
+  }, [trustKey, loadSkills]);
 
   useEffect(() => {
     if (selected) setLastSettingsSelection("skills", selected, cwd);
@@ -701,6 +891,7 @@ export function SkillsConfig({
     const next = !skill.disableModelInvocation;
     setToggling((s) => new Set(s).add(skill.filePath));
     setSaveError(null);
+    setGroupStatus(null);
     try {
       const res = await fetch("/api/skills", {
         method: "PATCH",
@@ -733,15 +924,136 @@ export function SkillsConfig({
     }
   }, []);
 
+  const removeSkill = useCallback(async (skill: Skill): Promise<string | null> => {
+    setRemoving(true);
+    try {
+      const res = await fetch("/api/skills/remove", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "remove", cwd, filePath: skill.filePath }),
+      });
+      const d = (await res.json()) as Partial<SkillRemoveResponse> & { error?: string };
+      if (!res.ok || d.error || !d.token) return d.error ?? `HTTP ${res.status}`;
+      setRemoved({
+        token: d.token,
+        name: d.name ?? skill.name,
+        expiresInMs: d.expiresInMs ?? 0,
+        undoing: false,
+        error: null,
+      });
+      await loadSkills();
+      // 点「移除」的按钮随详情窗格一起没了，焦点掉到页面上；交给撤销按钮，键盘用户才接得上
+      focusIfLost(document, undoButtonRef.current);
+      return null;
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    } finally {
+      setRemoving(false);
+    }
+  }, [cwd, loadSkills]);
+
+  const undoRemoval = useCallback(async () => {
+    if (!removed) return;
+    const { token } = removed;
+    // 只改这一个令牌的通知：撤销途中若又移除了别的技能，通知已换成新的，不能被这次的结果覆盖
+    const update = (patch: { undoing: boolean; error: string | null } | null) =>
+      setRemoved((current) => {
+        if (current?.token !== token) return current;
+        return patch && { ...current, ...patch };
+      });
+    update({ undoing: true, error: null });
+    try {
+      const res = await fetch("/api/skills/remove", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "undo", token }),
+      });
+      const d = (await res.json()) as Partial<SkillRestoreResponse> & { error?: string };
+      if (!res.ok || d.error || !d.filePath) throw new Error(d.error ?? `HTTP ${res.status}`);
+      update(null);
+      await loadSkills();
+      setSelected(d.filePath);
+      setAddMode(false);
+    } catch (e) {
+      update({ undoing: false, error: e instanceof Error ? e.message : String(e) });
+    }
+  }, [removed, loadSkills]);
+
+  // 通知在服务端放手撤销的那一刻收起
+  const removedToken = removed?.token;
+  const removedExpiresInMs = removed?.expiresInMs;
+  useEffect(() => {
+    if (removedToken === undefined || removedExpiresInMs === undefined) return;
+    const timer = setTimeout(
+      () => setRemoved((current) => (current?.token === removedToken ? null : current)),
+      removedExpiresInMs,
+    );
+    return () => clearTimeout(timer);
+  }, [removedToken, removedExpiresInMs]);
+
+  // One PATCH for the whole group: each file is edited on its own and
+  // reported separately, so the skills the route refuses keep their state and
+  // are named under the group heading while the rest switch.
+  const setGroupSkills = useCallback(async (group: string, groupSkills: Skill[], enabled: boolean) => {
+    const targets = skillsToSwitch(groupSkills, enabled);
+    if (targets.length === 0) return;
+    const filePaths = targets.map((skill) => skill.filePath);
+    const disableModelInvocation = !enabled;
+    setToggling((current) => new Set([...current, ...filePaths]));
+    setBulkGroup(group);
+    setSaveError(null);
+    setGroupStatus(null);
+    try {
+      const res = await fetch("/api/skills", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filePaths, disableModelInvocation }),
+      });
+      const d = (await res.json()) as { results?: SkillToggleResult[]; error?: string };
+      if (!res.ok || d.error || !d.results) throw new Error(d.error ?? `HTTP ${res.status}`);
+      const results = d.results;
+      setSkills((prev) => applySkillToggleResults(prev, results, disableModelInvocation));
+      const failures = results.filter((result) => result.error);
+      if (failures.length > 0) {
+        const names = new Map(targets.map((skill) => [skill.filePath, skill.name]));
+        setGroupStatus({
+          group,
+          error: [
+            t("skills.bulkFailed", { count: failures.length, total: results.length }),
+            ...failures.map((failure) => `${names.get(failure.filePath) ?? failure.filePath}: ${failure.error}`),
+          ].join("\n"),
+        });
+      }
+    } catch (e) {
+      setGroupStatus({ group, error: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setBulkGroup(null);
+      setToggling((current) => {
+        const next = new Set(current);
+        for (const filePath of filePaths) next.delete(filePath);
+        return next;
+      });
+    }
+  }, [t]);
+
   const selectedSkill = skills.find((s) => s.filePath === selected) ?? null;
+  const bulkBusy = loading || toggling.size > 0 || updatingSkill !== null || removing;
 
   return (
     <ConfigPanelShell embedded={embedded} title={t("common.skills")} subtitle={shortenPath(cwd)} closeLabel={t("i18n.close")} onClose={onClose}>
 
-        {!projectResourcesLoaded && (
-          <div role="status" className="config-trust-notice">
-            {t("trust.skillsNotLoaded")}
-          </div>
+        {!projectResourcesLoaded && <ConfigTrustNotice message={t("trust.skillsNotLoaded")} />}
+        {removed && (
+          <ConfigNotice
+            action={
+              <ConfigButton ref={undoButtonRef} size="small" onClick={() => void undoRemoval()} disabled={removed.undoing}>
+                {removed.undoing ? t("skills.undoing") : t("skills.undo")}
+              </ConfigButton>
+            }
+          >
+            {t("skills.removed", { name: removed.name })}
+            {removed.error && <> {t("skills.undoFailed")} {removed.error}</>}
+          </ConfigNotice>
         )}
 
         {/* Body */}
@@ -836,11 +1148,25 @@ export function SkillsConfig({
                   };
                   return groups.map(
                     ({ label: grpLabel, skills: grpSkills }) => {
+                      const visible = grpSkills.filter((skill) => !skill.disableModelInvocation).length;
+                      const allVisible = visible === grpSkills.length;
                       return (
                         <div key={grpLabel} className="config-sidebar-group">
-                          <ConfigSidebarGroupLabel>
+                          <ConfigSidebarGroupLabel
+                            aside={
+                              <ConfigSidebarGroupSwitch
+                                enabled={visible}
+                                total={grpSkills.length}
+                                disabled={bulkBusy}
+                                loading={bulkGroup === grpLabel}
+                                label={t(allVisible ? "skills.groupSwitchOn" : "skills.groupSwitchOff", { group: grpLabel })}
+                                onChange={(enabled) => void setGroupSkills(grpLabel, grpSkills, enabled)}
+                              />
+                            }
+                          >
                             {grpLabel}
                           </ConfigSidebarGroupLabel>
+                          {groupStatus?.group === grpLabel && <ConfigSidebarGroupStatus error={groupStatus.error} />}
                           {orderSkillsByDormancy(grpSkills).map(renderSkillRow)}
                         </div>
                       );
@@ -880,6 +1206,13 @@ export function SkillsConfig({
                 onInstalled={() => {
                   void loadSkills();
                 }}
+                onImported={(result) => {
+                  // 导入完成：刷新列表，选中新技能并回到详情页
+                  void loadSkills().then(() => {
+                    setSelected(result.filePath);
+                    setAddMode(false);
+                  });
+                }}
               />
             ) : loading ? null : selectedSkill ? (
               <SkillDetail
@@ -889,6 +1222,8 @@ export function SkillsConfig({
                 onToggle={toggle}
                 toggling={toggling.has(selectedSkill.filePath)}
                 saveError={saveError}
+                removing={removing}
+                onRemove={removeSkill}
                 updateStatus={
                   updateKey(selectedSkill)
                     ? updateStatuses[updateKey(selectedSkill)!]

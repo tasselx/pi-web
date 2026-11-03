@@ -22,6 +22,8 @@ interface Props {
   compact?: boolean;
   /** Keep the inline dropdown mounted while another control supplies its trigger */
   hideInlineButton?: boolean;
+  /** The session is running: the tree stays readable but branches cannot be switched */
+  locked?: boolean;
 }
 
 // Find the visible entry IDs on the path from root to activeLeafId.
@@ -122,7 +124,8 @@ interface TreeNodeProps {
   depth: number;
   isLast: boolean;
   parentLines: boolean[]; // whether ancestor at each depth has more siblings after
-  onSelect: (id: string) => void;
+  /** Absent while switching is locked */
+  onSelect?: (id: string) => void;
 }
 
 function TreeNodeView({ node, activePathIds, depth, isLast, parentLines, onSelect }: TreeNodeProps) {
@@ -144,9 +147,9 @@ function TreeNodeView({ node, activePathIds, depth, isLast, parentLines, onSelec
           display: "flex",
           alignItems: "center",
           height: 24,
-          cursor: "pointer",
+          cursor: onSelect ? "pointer" : "default",
         }}
-        onClick={() => onSelect(rep.entry.id)}
+        onClick={onSelect ? () => onSelect(rep.entry.id) : undefined}
       >
         {/* Indent guide lines */}
         {parentLines.map((hasLine, i) => (
@@ -254,7 +257,7 @@ function TreeNodeView({ node, activePathIds, depth, isLast, parentLines, onSelec
   );
 }
 
-export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, containerRef, open: openProp, onToggle, hasSession, compact, hideInlineButton }: Props) {
+export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, containerRef, open: openProp, onToggle, hasSession, compact, hideInlineButton, locked = false }: Props) {
   const { t } = useI18n();
   const [openInternal, setOpenInternal] = useState(false);
   const open = openProp !== undefined ? openProp : openInternal;
@@ -283,6 +286,13 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
   const handleSelect = useCallback((id: string) => {
     onLeafChange(id);
   }, [onLeafChange]);
+  const selectBranch = locked ? undefined : handleSelect;
+
+  const lockedNotice = locked && (
+    <div style={{ padding: "2px 0 4px", fontSize: 11, color: "var(--text-dim)", fontStyle: "italic" }}>
+      {t("i18n.branchesLockedWhileRunning")}
+    </div>
+  );
 
   const noBranchReason = !hasSession
     ? t("i18n.noActiveSession")
@@ -293,8 +303,12 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
   const topLevel = selectTopLevelBranches(tree);
   const hasContent = !noBranchReason && topLevel.length > 0;
 
+  // 顶栏里的图标按钮与 Debug 按钮一致：图标颜色只表示面板开没开（打开为强调色，未打开为暗色）。
+  // 之前按「有没有分支」着色，而顶栏里这个按钮只在有分支时才出现，图标恒为强调色，看不出选中与否。
+  // 堆叠版本带文字标题，仍按「有没有分支」着色。
+  const iconAccent = inline ? open : hasContent;
   const branchIcon = (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: hasContent ? "var(--accent)" : "var(--text-dim)", flexShrink: 0 }}>
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: iconAccent ? "var(--accent)" : "var(--text-dim)", flexShrink: 0 }}>
       <line x1="6" y1="3" x2="6" y2="15" />
       <circle cx="18" cy="6" r="3" />
       <circle cx="6" cy="18" r="3" />
@@ -352,6 +366,7 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
           }}>
             {hasContent ? (
               <div style={{ padding: "4px 12px 8px 12px", maxHeight: 260, overflowY: "auto" }}>
+                {lockedNotice}
                 {topLevel.map((child, idx) => (
                   <TreeNodeView
                     key={child.entry.id}
@@ -360,7 +375,7 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
                     depth={0}
                     isLast={idx === topLevel.length - 1}
                     parentLines={[]}
-                    onSelect={handleSelect}
+                    onSelect={selectBranch}
                   />
                 ))}
               </div>
@@ -413,6 +428,7 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
         }}>
           {hasContent ? (
             <div style={{ padding: "4px 12px 8px 12px", maxHeight: 260, overflowY: "auto" }}>
+              {lockedNotice}
               {topLevel.map((child, idx) => (
                 <TreeNodeView
                   key={child.entry.id}
@@ -421,7 +437,7 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
                   depth={0}
                   isLast={idx === topLevel.length - 1}
                   parentLines={[]}
-                  onSelect={handleSelect}
+                  onSelect={selectBranch}
                 />
               ))}
             </div>

@@ -42,13 +42,22 @@ differ from their originals:
 | File | Why |
 | --- | --- |
 | `app/layout.tsx`, `app/page.tsx`, `app/DemoRoot.tsx` | Load the mock, no service worker or manifest |
-| `components/AppShell.tsx` | Open the README preview by default, base-path-safe `router.replace`, in-browser "Full history" |
+| `components/AppShell.tsx` | Open the README preview by default, base-path-safe `router.replace` |
 | `components/ChatWindow.tsx`, `FileIcons.tsx`, `ProviderIcon.tsx` | Prefix static assets with the Pages base path |
 | `components/FileViewer.tsx`, `FileExplorer.tsx`, `MarkdownBody.tsx` | Load images, media and downloads from the static snapshot |
-| `lib/subagent-extension.ts`, `lib/terminal-manager.ts` | Types only; the originals are server code |
+| `components/MessageView.tsx` | `parseStreamingJson` from the `partial-json` parser pi-ai wraps; the demo ships no SDK |
+| `lib/file-tree-visibility.ts`, `lib/session-export.ts`, `lib/subagent-extension.ts`, `lib/terminal-manager.ts` | Types only; the originals are server code |
 
 To pick up UI changes from the main project, copy the updated files over and
-re-apply the changes above (search for `demo` / `@/mock` in those files).
+re-apply the changes above (search for `demo` / `@/mock` in those files). Then
+check the seams the copy cannot see:
+
+- A server module the client imports only for its types gets a types-only copy,
+  like the last row.
+- A new `/api/*` call needs a handler in `mock/`: an unknown path answers
+  `404 Not found`. Type a handler's response against `lib/api-types.ts` where
+  that file defines it, so the type check in `npm run build` flags a drifted
+  shape.
 
 ## Isolation from Pi Web
 

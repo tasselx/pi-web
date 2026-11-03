@@ -306,7 +306,7 @@ const ROUTES: Record<string, Handler> = {
     : error(demoOnlyMessage(), 501)),
   "app-update": () => {
     const version = process.env.NEXT_PUBLIC_APP_VERSION ?? "0.0.0";
-    return json({ currentVersion: version, latestVersion: version, updateAvailable: false, releaseUrl: `https://github.com/agegr/pi-web/releases/tag/v${version}` } satisfies AppUpdateResponse);
+    return json({ currentVersion: version, latestVersion: version, updateAvailable: false, releaseUrl: `https://github.com/tasselx/pi-web/releases/tag/v${version}` } satisfies AppUpdateResponse);
   },
   // 只有服务器和浏览器在同一台机器上才能弹出文件管理器；演示页永远是远程的，客户端据此显示对应提示。
   "open-in-explorer": (request) => (request.method === "GET"

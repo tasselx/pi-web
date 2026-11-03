@@ -18,6 +18,8 @@ export interface ContextUsage {
 export interface ModelLike {
   id: string;
   provider: string;
+  /** Dollars per million tokens. */
+  cost?: { input: number; output: number; cacheRead: number; cacheWrite: number };
 }
 
 export interface ToolInfo {
@@ -25,6 +27,8 @@ export interface ToolInfo {
   description: string;
   parameters?: unknown;
   promptGuidelines?: string[];
+  /** How the model reaches the tool (pi >= 0.99); absent means `direct`. */
+  exposure?: "direct" | "model-only" | "codemode" | "deferred" | "hidden";
   sourceInfo?: unknown;
 }
 
@@ -133,16 +137,26 @@ export interface AgentSessionLike {
   readonly model: ModelLike | undefined;
   readonly modelRuntime: {
     getModel: (provider: string, modelId: string) => ModelLike | undefined;
-    refresh: (options?: { allowNetwork?: boolean }) => Promise<unknown>;
+    refresh: (options?: { allowNetwork?: boolean; providers?: string[]; signal?: AbortSignal }) => Promise<unknown>;
   };
   readonly sessionManager: SessionManager;
   readonly settingsManager: SettingsManager;
+  /**
+   * The prompt this session would send right now, rendered from its current options.
+   *
+   * Readable before the first run, unlike `agent.state.systemPrompt`, which replays the
+   * transcript and is empty until a run persists a system message. It does not keep the
+   * sections a `before_agent_start` handler changed for a finished run; the replay does.
+   */
+  readonly systemPrompt: string;
   readonly agent: {
     state?: {
       /** Replayed from the transcript's system messages since Pi 0.86; never assign it. */
       readonly systemPrompt?: string;
       thinkingLevel?: string;
       streamingMessage?: PiAgentMessage;
+      /** The declared tools, with the descriptions `prepareLoadout` hooks set for the model. */
+      readonly tools?: readonly { readonly name: string; readonly description: string }[];
     };
   };
   readonly extensionRunner: ExtensionRunnerLike;
@@ -157,7 +171,8 @@ export interface AgentSessionLike {
     images?: Array<{ type: "image"; data: string; mimeType: string }>;
     streamingBehavior?: "steer" | "followUp";
     source?: "interactive" | "rpc";
-    preflightResult?: (success: boolean) => void;
+    /** Called once the SDK accepts the input; a rejected prompt only rejects the returned promise. */
+    preflightResult?: (disposition: "handled" | "queued" | "started") => void;
   }): Promise<void>;
   sendCustomMessage<T = unknown>(message: {
     customType: string;
@@ -175,6 +190,8 @@ export interface AgentSessionLike {
   }): Promise<{ output: string; exitCode?: number; cancelled?: boolean; truncated?: boolean; fullOutputPath?: string }>;
   abortBash(): void;
   readonly isBashRunning: boolean;
+  /** An auto-retry waiting out its backoff; optional because test sessions leave it out. */
+  readonly isRetrying?: boolean;
   setModel(model: ModelLike): Promise<void>;
   navigateTree(targetId: string, options?: { summarize?: boolean }): Promise<NavigateTreeResult>;
   setThinkingLevel(level: string): void;
@@ -184,8 +201,8 @@ export interface AgentSessionLike {
   getLastAssistantText(): string | undefined;
   setAutoCompactionEnabled(enabled: boolean): void;
   setAutoRetryEnabled(enabled: boolean): void;
-  steer(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>): Promise<void>;
-  followUp(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>): Promise<void>;
+  steer(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>): Promise<"handled" | "queued">;
+  followUp(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>): Promise<"handled" | "queued">;
   readonly pendingMessageCount: number;
   getSteeringMessages(): readonly string[];
   getFollowUpMessages(): readonly string[];

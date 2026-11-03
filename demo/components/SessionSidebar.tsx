@@ -1,36 +1,145 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useImperativeHandle, useLayoutEffect, useState, useCallback, useMemo, useRef, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode, type Ref, type RefObject, type UIEvent as ReactUIEvent } from "react";
 import type { SessionInfo } from "@/lib/types";
-import { listSessionFamilies } from "@/lib/session-family";
-import { loadExplorerOpen, saveExplorerOpen } from "@/lib/file-explorer-state";
+import { listSessionFamilies, type SessionFamily, isHiddenRelation } from "@/lib/session-family";
 import { dispatchSessionRowContextMenu } from "@/lib/session-row-context-menu";
-import { skillExpansionToCommand } from "@/lib/slash-display";
-import { getProjectActivity, getRecentProjects, sessionsForProject } from "@/lib/project-groups";
+import { newSessionDeepLink, sessionDeepLink } from "@/lib/session-links";
+import { getProjectActivity, getRecentProjects } from "@/lib/project-groups";
 import { workspaceKeyOf } from "@/lib/workspace-memory";
-import { formatRelativeTime } from "@/lib/i18n/format";
+import {
+  adjacentProjectMove,
+  archivedFamilyIds,
+  buildArchiveRows,
+  buildSessionTree,
+  effectiveGroupExpansion,
+  familiesToArchive,
+  familiesToDelete,
+  familyIds,
+  forgetKeptOpenGroups,
+  forgetShownMoreOfFolded,
+  isFamilyArchived,
+  isGroupExpanded,
+  keepOutgoingGroupOpen,
+  nextProjectKeysToRecord,
+  PINNED_MORE_KEY,
+  projectFamiliesToArchive,
+  showLessFamilies,
+  showMoreFamilies,
+  type SidebarProject,
+  type SidebarRow,
+} from "@/lib/session-tree";
+import {
+  forgetRetiredSidebarKeys,
+  loadArchiveCollapsed,
+  loadFilesCollapsed,
+  loadGroupExpansion,
+  loadNonGitCwds,
+  loadPinnedCollapsed,
+  loadShowIgnoredFiles,
+  loadSidebarTab,
+  rememberCwdGitStatus,
+  saveArchiveCollapsed,
+  saveFilesCollapsed,
+  saveGroupExpansion,
+  savePinnedCollapsed,
+  saveShowIgnoredFiles,
+  saveSidebarTab,
+  type SidebarTab,
+} from "@/lib/sidebar-prefs";
+import {
+  deleteProjectSessions,
+  forkFailureMessage,
+  projectNameMenuEntries,
+  projectRenameRequest,
+  requestSessionTitle,
+  sessionMenuEntries,
+  type SessionMenuActionId,
+  worktreeCreateFailure,
+} from "@/lib/sidebar-actions";
+import { shortenPath } from "@/lib/display-path";
+import { splitBeforeForkSuffix } from "@/lib/session-fork-name";
+import {
+  mergeProjectChoices,
+  newSessionContextKey,
+  newSessionTargetForProject,
+  projectForCwd,
+  withProjectAlias,
+  type NewSessionContext,
+  type NewSessionOptions,
+  type NewSessionTarget,
+  type ProjectChoice,
+  type WorktreeChoice,
+} from "@/lib/new-session-context";
+import {
+  chunkForSessionUiRequests,
+  MAX_PROJECT_ORDER_KEYS,
+  MAX_SESSION_UI_IDS_PER_REQUEST,
+  type ProjectMovePosition,
+  type SessionUiStateRequest,
+} from "@/lib/session-ui-state-shared";
+import { countFaviconUnread, syncFaviconBadge } from "@/lib/favicon-badge";
+import { focusIfLost, type FocusDocument } from "@/lib/stacked-dialog";
+import { noteRunningPoll } from "@/lib/page-debug";
+import { useFilesPlacement } from "@/hooks/useFilesPlacement";
 import { useI18n } from "@/hooks/useI18n";
+import { useIsMobile } from "@/hooks/useIsMobile";
 import { useResizablePanel } from "@/hooks/useResizablePanel";
 import { useScrollbarVisibility } from "@/hooks/useScrollbarVisibility";
+import { useSessionUiState } from "@/hooks/useSessionUiState";
+import { archiveViewState, filesFoldState, useSidebarMotion } from "@/hooks/useSidebarMotion";
 import { DirectoryPicker } from "./DirectoryPicker";
+import { DismissButton } from "./DismissButton";
+import { ExportSessionDialog } from "./ExportSessionDialog";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
+import { ImportSessionDialog } from "./ImportSessionDialog";
+import { PiWebTitle } from "./PiWebTitle";
+import { ProjectWorktreePicker, type ProjectWorktreePickerHandle, type WorktreeRemoval } from "./ProjectWorktreePicker";
 import { SessionSearch } from "./SessionSearch";
+import { SessionTree, sessionRowTitle, type SessionTreeReveal } from "./SessionTree";
+import { ShareSessionDialog } from "./ShareSessionDialog";
+import { SidebarMenu, type SidebarMenuAnchor, type SidebarMenuItem } from "./SidebarMenu";
+import { SidebarToast, type SidebarToastAction, type SidebarToastData } from "./SidebarToast";
+import {
+  ArchiveIcon,
+  ChangesIcon,
+  CheckIcon,
+  ChevronIcon,
+  DotIcon,
+  DotOutlineIcon,
+  DownloadIcon,
+  EyeIcon,
+  FolderIcon,
+  MessageIcon,
+  MoreIcon,
+  ForkIcon,
+  OpenInNewTabIcon,
+  PencilIcon,
+  PinIcon,
+  PinOffIcon,
+  PlusIcon,
+  RefreshIcon,
+  RestoreIcon,
+  SearchIcon,
+  ShareIcon,
+  SpinnerIcon,
+  TerminalIcon,
+  TrashIcon,
+  UploadIcon,
+  WandIcon,
+} from "./SidebarIcons";
 
-// Fixed row height for the session list. SessionItem renders at exactly this
-// height, so the list can be windowed (only the visible slice is mounted).
-const SESSION_LIST_ITEM_HEIGHT = 54;
-
-export function getSessionListIndices(count: number, scrollTop: number, viewportHeight: number, focusedIndex = -1): number[] {
-  const overscan = 8;
-  const visibleCount = Math.ceil((viewportHeight || 600) / SESSION_LIST_ITEM_HEIGHT) + overscan * 2;
-  const start = Math.max(0, Math.min(Math.floor(scrollTop / SESSION_LIST_ITEM_HEIGHT) - overscan, count - visibleCount));
-  const end = Math.min(count, start + visibleCount);
-  const indices = Array.from({ length: end - start }, (_, offset) => start + offset);
-  // Keep a focused row mounted so scrolling cannot discard an inline rename.
-  if (focusedIndex >= 0 && focusedIndex < start) indices.unshift(focusedIndex);
-  if (focusedIndex >= end && focusedIndex < count) indices.push(focusedIndex);
-  return indices;
+interface FileManagerAvailability {
+  supported: boolean;
+  reason: string | null;
+  platform: string;
 }
+
+// Server error codes with a translation; any other code is shown verbatim.
+const FILE_MANAGER_ERROR_KEYS: Record<string, string> = {
+  remote: "sidebar.openInExplorerRemoteOnly",
+  "unsupported-platform": "sidebar.openInExplorerUnsupported",
+};
 
 declare global {
   interface Window {
@@ -40,59 +149,49 @@ declare global {
   }
 }
 
+/**
+ * A key of the files' actions: in the files section's header row below the
+ * sessions, or in the files tab's row under the project and worktree.
+ */
 function ToolbarIconButton({
+  ref,
   onClick,
   title,
   disabled,
-  skipHover,
-  color,
-  background = "none",
-  marginRight,
-  ariaPressed,
+  pressed,
+  expanded,
+  controls,
+  done,
+  className,
   children,
 }: {
+  ref?: Ref<HTMLButtonElement>;
   onClick: () => void;
   title: string;
   disabled?: boolean;
-  skipHover?: boolean;
-  color: string;
-  background?: string;
-  marginRight?: number;
-  ariaPressed?: boolean;
+  /** A toggle's state: shown pressed (accent) and exposed as aria-pressed. */
+  pressed?: boolean;
+  /** What it opens is open (the file search): shown as pressed, exposed as aria-expanded. */
+  expanded?: boolean;
+  /** The id of what it opens. */
+  controls?: string;
+  /** Brief confirmation after an action (refresh). */
+  done?: boolean;
+  className?: string;
   children: ReactNode;
 }) {
-  const enter = (e: React.MouseEvent<HTMLButtonElement>) => {
-    if (disabled || skipHover) return;
-    e.currentTarget.style.color = "var(--text-muted)";
-    e.currentTarget.style.background = "var(--bg-hover)";
-  };
-  const leave = (e: React.MouseEvent<HTMLButtonElement>) => {
-    if (disabled || skipHover) return;
-    e.currentTarget.style.color = color;
-    e.currentTarget.style.background = background;
-  };
   return (
     <button
+      ref={ref}
+      type="button"
       onClick={onClick}
       disabled={disabled}
       title={title}
       aria-label={title}
-      aria-pressed={ariaPressed}
-      style={{
-        position: "relative",
-        display: "flex", alignItems: "center", justifyContent: "center",
-        width: 26, height: 26, padding: 0, marginRight,
-        background,
-        border: "none",
-        color,
-        cursor: disabled ? "default" : "pointer",
-        borderRadius: 5,
-        flexShrink: 0,
-        opacity: disabled ? 0.6 : 1,
-        transition: "color 0.3s, background 0.3s",
-      }}
-      onMouseEnter={enter}
-      onMouseLeave={leave}
+      aria-pressed={pressed}
+      aria-expanded={expanded}
+      aria-controls={controls}
+      className={`sidebar-tool-button${pressed || expanded ? " is-active" : ""}${done ? " is-done" : ""}${className ? ` ${className}` : ""}`}
     >
       {children}
     </button>
@@ -105,11 +204,24 @@ function sessionListUrl(summary: boolean, force: boolean): string {
   return "/api/sessions";
 }
 
+/** How a pick in the sidebar opens a session. */
+export interface SelectSessionOptions {
+  /** Leave a phone's drawer open: the sidebar has more to show (a fork's revealed row and its toast). */
+  keepSidebarOpen?: boolean;
+}
+
 interface Props {
   selectedSessionId: string | null;
-  onSelectSession: (session: SessionInfo, isRestore?: boolean, entryId?: string, blockIndex?: number) => void;
-  onNewSession?: (sessionId: string, cwd: string) => void;
+  onSelectSession: (session: SessionInfo, isRestore?: boolean, entryId?: string, blockIndex?: number, options?: SelectSessionOptions) => void;
+  /** projectKey: the target's project identity when it is known (a group's "+", the composer's bar). */
+  onNewSession?: (sessionId: string, cwd: string, projectKey?: string | null, options?: NewSessionOptions) => void;
+  /** What the bar above a fresh composer moves through (`SessionSidebarControl`). */
+  controlRef?: Ref<SessionSidebarControl>;
+  /** The sidebar's cwd as the bar above a fresh composer shows it; reported when that changes. */
+  onNewSessionContextChange?: (context: NewSessionContext | null) => void;
   initialSessionId?: string | null;
+  /** `initialSessionId` is the URL's `?session=`: a toast says so when it is gone. */
+  initialSessionLinked?: boolean;
   skipInitialProjectSelection?: boolean;
   onInitialRestoreDone?: () => void;
   refreshKey?: number;
@@ -129,15 +241,40 @@ interface Props {
   /** Fired when a session that is not currently selected finishes running.
    *  Lets the app play a cross-workspace completion tone. */
   onBackgroundTaskDone?: () => void;
+  /**
+   * Sessions that finished while the tab was hidden (#1484): usually the
+   * selected one, which `unreadSessionIds` excludes. Counted by the favicon
+   * until the tab is opened again; never persisted, never dotted.
+   */
+  hiddenFinishedSessionIds?: Set<string>;
   onRunningSessionIdsChange?: (ids: Set<string>) => void;
   onSessionsChange?: (sessions: SessionInfo[]) => void;
+  onSessionImported?: (sessionId: string) => void;
 }
 
-interface WorktreeEntry {
-  path: string;
-  branch: string | null;
-  isMain: boolean;
+/**
+ * How the bar above a fresh composer (components/NewSessionContextBar.tsx)
+ * moves it: the sidebar keeps the cwd and the project identity, so every
+ * move goes through here, as the sidebar's own "+" buttons do.
+ */
+export interface SessionSidebarControl {
+  /** Identity, then the sidebar's cwd, then `onNewSession`, as any new session. */
+  startNewSessionIn(target: NewSessionTarget): void;
+  /**
+   * Opens the folder picker; the validated folder goes to `onPicked`, which
+   * decides whether to start there. Focus goes back to `returnFocusTo` when
+   * the picker closes without moving the composer.
+   */
+  openFolderForNewSession(onPicked: (target: NewSessionTarget) => void, returnFocusTo: HTMLElement | null): void;
+  /** "Use default directory": today's ~/pi-cwd folder, validated as the folder picker's, goes to `onPicked`. */
+  openDefaultDirectoryForNewSession(onPicked: (target: NewSessionTarget) => void): void;
+  /** Lists the worktrees of the sidebar's cwd again (the composer's worktree menu opening). */
+  refreshWorktrees(): void;
+  /** Creates a worktree of `project` and lists it at once; the caller starts the session in it. */
+  createWorktree(project: ProjectChoice, branch: string): Promise<{ path: string } | { error: string }>;
 }
+
+type WorktreeEntry = WorktreeChoice;
 
 interface WorktreeState {
   /** The cwd this data was fetched for — guards against stale responses */
@@ -165,14 +302,82 @@ interface ValidatedProject {
   key: string;
 }
 
+type SessionRow = Extract<SidebarRow, { kind: "session" }>;
+
+/**
+ * The one popup menu of the sidebar; kept here, above the virtualized rows.
+ * `askDelete`: a menu turned into its delete question (a group's "Delete all
+ * sessions", an archive header's "Delete all", the archive bar's two).
+ * `askRemove`: a group's menu turned into its "Delete workspace…" question.
+ */
+type SidebarMenuState =
+  | { kind: "row"; row: SessionRow; anchor: SidebarMenuAnchor; opener: HTMLElement | null }
+  | { kind: "group"; project: SidebarProject; olderCount: number; anchor: SidebarMenuAnchor; opener: HTMLElement; askDelete?: boolean; askRemove?: boolean }
+  | { kind: "archive-group"; project: SidebarProject; anchor: SidebarMenuAnchor; opener: HTMLElement; askDelete?: boolean }
+  | { kind: "archive"; anchor: SidebarMenuAnchor; opener: HTMLElement; askDelete?: ArchiveDeleteScope };
+
+/** The archive bar's deletes: every archived session, or those archived over 30 days ago. */
+type ArchiveDeleteScope = "all" | "old";
+
 const UNREAD_SESSIONS_STORAGE_KEY = "pi-web:unread-session-ids";
 const LAST_CUSTOM_CWD_STORAGE_KEY = "pi-web:last-custom-cwd";
 const RUNNING_SESSIONS_POLL_MS = 2500;
 const SESSION_DETAILS_HYDRATION_DELAY_MS = 750;
-const SESSION_PANE_DEFAULT_HEIGHT = 320;
-const SESSION_PANE_MIN_HEIGHT = 80;
-const EXPLORER_PANE_MIN_HEIGHT = 120;
-const SESSION_PANE_MAX_HEIGHT = 1600;
+/** "Archive sessions older than 7 days" in a project's menu. */
+const ARCHIVE_OLDER_THAN_MS = 7 * 24 * 60 * 60 * 1000;
+/** The archive bar's "Delete archived over 30 days ago", by archive time. */
+const ARCHIVED_DELETE_AFTER_MS = 30 * 24 * 60 * 60 * 1000;
+const TOAST_TITLE_MAX = 28;
+
+/**
+ * The files section below the sessions (the desktop's default layout). Its
+ * height is the separator's, kept per browser: at least its header row (the
+ * keys in it), the picker's row and about six tree rows; at
+ * most what leaves the sessions SESSIONS_SECTION_MIN_HEIGHT (a few rows, the
+ * CSS min-height of their panel). By default 45% of the sidebar under its
+ * toolbar row; the 320px stands in until that is measured. A sidebar shorter
+ * than both minimums shrinks the files section in CSS (app/sidebar.css).
+ */
+const FILES_SECTION_MIN_HEIGHT = 220;
+const FILES_SECTION_MAX_HEIGHT = 2000;
+const FILES_SECTION_DEFAULT_HEIGHT = 320;
+const FILES_SECTION_DEFAULT_SHARE = 0.45;
+const SESSIONS_SECTION_MIN_HEIGHT = 120;
+const SIDEBAR_HEADER_HEIGHT = 36;
+
+const SESSION_ACTION_LABEL_KEYS: Record<SessionMenuActionId, string> = {
+  "open-new-tab": "sidebar.openInNewTab",
+  pin: "sidebar.pin",
+  unpin: "sidebar.unpin",
+  rename: "sidebar.rename",
+  "generate-title": "title.generate",
+  fork: "sidebar.fork",
+  share: "sidebar.share",
+  export: "sidebar.export",
+  "mark-read": "sidebar.markRead",
+  "mark-unread": "sidebar.markUnread",
+  archive: "sidebar.archive",
+  unarchive: "sidebar.unarchive",
+  delete: "sidebar.delete",
+};
+
+function sessionActionIcon(id: SessionMenuActionId): ReactNode {
+  switch (id) {
+    case "open-new-tab": return <OpenInNewTabIcon />;
+    case "pin": return <PinIcon />;
+    case "unpin": return <PinOffIcon />;
+    case "rename": return <PencilIcon />;
+    case "generate-title": return <WandIcon />;
+    case "fork": return <ForkIcon />;
+    case "share": return <ShareIcon />;
+    case "export": return <DownloadIcon />;
+    case "mark-read": return <DotOutlineIcon />;
+    case "mark-unread": return <DotIcon />;
+    case "archive": return <ArchiveIcon />;
+    case "unarchive": return <RestoreIcon />;
+    case "delete": return <TrashIcon />;
+  }
+}
 
 function loadLastCustomCwd(): string {
   if (typeof window === "undefined") return "";
@@ -192,14 +397,40 @@ function saveLastCustomCwd(cwd: string): void {
   }
 }
 
+/** 系统「选择文件夹」对话框（服务端在本机弹出）的结果：选了、取消了、已经开着一个，
+ *  或这里没有（远程访问、不支持的平台、出错）。 */
+type NativeFolderChoice = { path: string } | "cancelled" | "busy" | "unavailable";
+
+async function chooseFolderNatively(prompt: string): Promise<NativeFolderChoice> {
+  try {
+    const res = await fetch("/api/cwd/pick", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt }),
+    });
+    const data = await res.json().catch(() => ({})) as { path?: string; error?: string };
+    if (res.ok) return data.path ? { path: data.path } : "cancelled";
+    return data.error === "busy" ? "busy" : "unavailable";
+  } catch {
+    return "unavailable";
+  }
+}
+
+function parseUnreadSessionIds(raw: string | null): Set<string> {
+  if (!raw) return new Set();
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (Array.isArray(parsed)) return new Set(parsed.filter((id): id is string => typeof id === "string"));
+  } catch {
+    // A malformed value (an interrupted write, another client) means no markers.
+  }
+  return new Set();
+}
+
 function loadUnreadSessionIds(): Set<string> {
   if (typeof window === "undefined") return new Set();
   try {
-    const raw = window.localStorage.getItem(UNREAD_SESSIONS_STORAGE_KEY);
-    if (!raw) return new Set();
-    const parsed = JSON.parse(raw) as unknown;
-    if (Array.isArray(parsed)) return new Set(parsed.filter((id): id is string => typeof id === "string"));
-    return new Set();
+    return parseUnreadSessionIds(window.localStorage.getItem(UNREAD_SESSIONS_STORAGE_KEY));
   } catch {
     return new Set();
   }
@@ -215,217 +446,159 @@ function saveUnreadSessionIds(ids: Set<string>): void {
   }
 }
 
-/** Substitute the home dir prefix with ~ (no path truncation — see PathLabel) */
-function displayCwd(cwd: string, homeDir?: string): string {
-  return (homeDir && cwd.startsWith(homeDir)) ? "~" + cwd.slice(homeDir.length) : cwd;
+/**
+ * The running set for a polled id list: `previous` itself while it holds the
+ * same ids. A new Set every 2.5 s poll would rebuild every tree row (memoized
+ * by identity) and re-run everything that watches the set, for nothing.
+ */
+export function sameIdsOr(previous: Set<string>, ids: readonly string[]): Set<string> {
+  const next = new Set(ids);
+  if (next.size !== previous.size) return next;
+  for (const id of next) {
+    if (!previous.has(id)) return next;
+  }
+  return previous;
+}
+
+/** Temporary id for a session that does not exist yet: pi is spawned lazily
+ *  when the user sends the first message, so no backend call is needed. */
+function createTempSessionId(): string {
+  return typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function shortTitle(title: string, max: number): string {
+  return title.length > max ? `${title.slice(0, max)}…` : title;
 }
 
 /**
- * Path label that ellipsizes on the LEFT, keeping the (most relevant) trailing
- * segments visible: "…orkspace/pi-web". Shows as much of the path as fits
- * instead of a fixed number of segments. The rtl container moves the ellipsis
- * to the left edge; the inner plaintext bidi isolation keeps the path itself
- * rendered strictly left-to-right (no punctuation reordering).
+ * focusIfLost, also when focus is still on an element that is no longer
+ * rendered (in a view just hidden) or inert (in a view sliding away, or
+ * covered by one sliding in): browsers move it to <body> only at their next
+ * rendering update, so it does not count as lost yet.
  */
-function PathLabel({ text, style }: { text: string; style?: CSSProperties }) {
-  return (
-    <span
-      style={{
-        overflow: "hidden",
-        textOverflow: "ellipsis",
-        whiteSpace: "nowrap",
-        display: "block",
-        minWidth: 0,
-        lineHeight: 1.35,
-        direction: "rtl",
-        textAlign: "left",
-        ...style,
-      }}
-    >
-      <span style={{ unicodeBidi: "plaintext" }}>{text}</span>
-    </span>
-  );
+function focusIfHidden(target: HTMLElement | null): void {
+  const active = document.activeElement;
+  if (target && active instanceof HTMLElement && active !== document.body && (active.getClientRects().length === 0 || active.closest("[inert]") !== null)) {
+    target.focus({ preventScroll: true });
+    return;
+  }
+  focusIfLost(document, target);
 }
 
-const DROPDOWN_ANIMATION_MS = 140;
+/** The key nearest `key` in its group that is still enabled, the next one first. */
+export function nearestEnabledKey(key: Element): HTMLButtonElement | null {
+  const enabled = (element: Element | null): element is HTMLButtonElement => element?.tagName === "BUTTON" && !(element as HTMLButtonElement).disabled;
+  for (let next = key.nextElementSibling; next; next = next.nextElementSibling) if (enabled(next)) return next;
+  for (let previous = key.previousElementSibling; previous; previous = previous.previousElementSibling) if (enabled(previous)) return previous;
+  return null;
+}
 
-function AnimatedDropdown({ open, children, style }: { open: boolean; children: ReactNode; style: CSSProperties }) {
-  const [mounted, setMounted] = useState(open);
-  const [visible, setVisible] = useState(open);
+/**
+ * Hands the focus of a key just disabled to the nearest key still enabled
+ * (else `fallback`). Focus still on the key counts as lost: current Chromium
+ * (154) keeps a just-disabled element focused until its next rendering
+ * update, after the layout effect that calls this, and only then blurs it to
+ * the page (relatedTarget null; older builds blur it at once, which
+ * focusIfLost covers). Focus the user put elsewhere stays. Returns whether
+ * it moved focus.
+ */
+export function handOffDisabledKeyFocus(doc: FocusDocument, key: Element, fallback: HTMLElement | null): boolean {
+  const target = nearestEnabledKey(key) ?? fallback;
+  if (!target || doc.activeElement !== key) return focusIfLost(doc, target);
+  target.focus({ preventScroll: true });
+  return true;
+}
 
-  useEffect(() => {
-    let frame: number | undefined;
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-
-    if (open) {
-      setMounted(true);
-      setVisible(false);
-      frame = window.requestAnimationFrame(() => {
-        frame = window.requestAnimationFrame(() => setVisible(true));
-      });
-    } else {
-      setVisible(false);
-      timeout = setTimeout(() => setMounted(false), DROPDOWN_ANIMATION_MS);
+/**
+ * How much of the toolbar row's labels fit (`data-fit`, app/sidebar.css):
+ * all (0), New's + alone (1), then the tabs' icons alone, or below the
+ * sessions the brand's versions in a smaller type (2): the brand itself is
+ * never cut. Measured, not a fixed width, since the labels' widths change
+ * with the language; on the row itself, before paint, again whenever it
+ * resizes or `labels` change. The returned fit is for what the row's size
+ * does not show: the brand's text changing its width.
+ */
+function useHeaderFit(ref: RefObject<HTMLElement | null>, labels: string): () => void {
+  const fit = useCallback(() => {
+    const header = ref.current;
+    if (!header) return;
+    for (const level of ["0", "1", "2"]) {
+      header.dataset.fit = level;
+      if (header.scrollWidth <= header.clientWidth) return;
     }
-
-    return () => {
-      if (frame !== undefined) window.cancelAnimationFrame(frame);
-      if (timeout) clearTimeout(timeout);
-    };
-  }, [open]);
-
-  if (!mounted) return null;
-
-  return (
-    <div
-      style={{
-        ...style,
-        opacity: visible ? 1 : 0,
-        transform: visible ? "translateY(0) scale(1)" : "translateY(-8px) scale(0.96)",
-        transformOrigin: "top center",
-        transition: `opacity ${DROPDOWN_ANIMATION_MS}ms ease, transform ${DROPDOWN_ANIMATION_MS}ms ease`,
-        pointerEvents: open ? "auto" : "none",
-      }}
-    >
-      {children}
-    </div>
-  );
+  }, [ref]);
+  useLayoutEffect(() => {
+    const header = ref.current;
+    if (!header) return;
+    fit();
+    const observer = new ResizeObserver(fit);
+    observer.observe(header);
+    return () => observer.disconnect();
+  }, [ref, fit, labels]);
+  return fit;
 }
 
-
-
-const SCRAMBLE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*";
-
-function useScramble(target: string, running: boolean): string {
-  const [display, setDisplay] = useState(target);
-  const frameRef = useRef<number | null>(null);
-  const iterRef = useRef(0);
-
-  useEffect(() => {
-    if (!running) {
-      setDisplay(target);
-      return;
-    }
-    iterRef.current = 0;
-    const totalFrames = target.length * 4;
-
-    const step = () => {
-      iterRef.current += 1;
-      const progress = iterRef.current / totalFrames;
-      const resolved = Math.floor(progress * target.length);
-
-      setDisplay(
-        target
-          .split("")
-          .map((char, i) => {
-            if (char === " ") return " ";
-            if (i < resolved) return char;
-            return SCRAMBLE_CHARS[Math.floor(Math.random() * SCRAMBLE_CHARS.length)];
-          })
-          .join("")
-      );
-
-      if (iterRef.current < totalFrames) {
-        frameRef.current = requestAnimationFrame(step);
-      } else {
-        setDisplay(target);
-      }
-    };
-
-    frameRef.current = requestAnimationFrame(step);
-    return () => { if (frameRef.current) cancelAnimationFrame(frameRef.current); };
-  }, [target, running]);
-
-  return display;
+/** A menu placed below (or above) a button, lined up with one of its edges. */
+function buttonAnchor(element: HTMLElement, align: "start" | "end"): SidebarMenuAnchor {
+  const rect = element.getBoundingClientRect();
+  return { kind: "rect", rect: { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }, align };
 }
 
-function PiWebTitle() {
-  const [showVersion, setShowVersion] = useState(false);
-  const [scrambling, setScrambling] = useState(false);
-  const revertTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const target = showVersion ? `${process.env.NEXT_PUBLIC_APP_VERSION ?? "0.0.0"}p${process.env.NEXT_PUBLIC_PI_VERSION ?? "0.0.0"}` : "Pi Web";
-  const display = useScramble(target, scrambling);
-
-  const triggerScramble = useCallback((toVersion: boolean) => {
-    setShowVersion(toVersion);
-    setScrambling(true);
-    setTimeout(() => setScrambling(false), (toVersion ? 6 : 8) * 4 * (1000 / 60) + 100);
-  }, []);
-
-  const handleClick = useCallback(() => {
-    if (revertTimerRef.current) clearTimeout(revertTimerRef.current);
-
-    const next = !showVersion;
-    triggerScramble(next);
-
-    if (next) {
-      revertTimerRef.current = setTimeout(() => triggerScramble(false), 3000);
-    }
-  }, [showVersion, triggerScramble]);
-
-  useEffect(() => () => { if (revertTimerRef.current) clearTimeout(revertTimerRef.current); }, []);
-
-  return (
-    <button
-      onClick={handleClick}
-      style={{
-        background: "none", border: "none", padding: 0, cursor: "default",
-        fontWeight: 700, fontSize: 15, letterSpacing: "-0.01em",
-        color: showVersion ? "var(--accent)" : "var(--text)",
-        fontFamily: "var(--font-mono)",
-        minWidth: "6ch",
-      }}
-    >
-      {display}
-    </button>
-  );
-}
-
-export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, onOpenTerminal, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onBackgroundTaskDone, onRunningSessionIdsChange, onSessionsChange }: Props) {
+export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, controlRef, onNewSessionContextChange, initialSessionId, initialSessionLinked, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, onOpenTerminal, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onBackgroundTaskDone, hiddenFinishedSessionIds, onRunningSessionIdsChange, onSessionsChange, onSessionImported }: Props) {
   const { t } = useI18n();
+  const isMobile = useIsMobile();
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   // Tracked in a ref only: the version is compared against the polled value to
   // decide whether the list needs reloading, and no render reads it.
   const sessionListVersionRef = useRef<number | null>(null);
   const sessionLoadIdRef = useRef(0);
   const [loading, setLoading] = useState(true);
+  // The first paint lists summary rows (their time is the file's mtime); the
+  // project order is first saved from the full details.
+  const [sessionDetailsLoaded, setSessionDetailsLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedCwd, setSelectedCwd] = useState<string | null>(null);
   const [homeDir, setHomeDir] = useState<string>("");
-  const [dropdownOpen, setDropdownOpen] = useState(false);
-  const [projectFilter, setProjectFilter] = useState("");
-  const [wtFilter, setWtFilter] = useState("");
-  const [customPathOpen, setCustomPathOpen] = useState(false);
+  // Open for the files tab's project list, or for the composer's bar ("new-session").
+  const [customPathOpen, setCustomPathOpen] = useState<false | "files" | "new-session">(false);
   const [customPathValue, setCustomPathValue] = useState(loadLastCustomCwd);
   const [customPathError, setCustomPathError] = useState<string | null>(null);
   const [customPathValidating, setCustomPathValidating] = useState(false);
   const [validatedProject, setValidatedProject] = useState<ValidatedProject | null>(null);
-  const dropdownRef = useRef<HTMLDivElement>(null);
-  // Worktree switcher state
+  // The files tab's project and worktree picker.
+  const filesPickerRef = useRef<ProjectWorktreePickerHandle>(null);
   const [worktreeState, setWorktreeState] = useState<WorktreeState | null>(null);
-  const [wtDropdownOpen, setWtDropdownOpen] = useState(false);
-  const [wtNewOpen, setWtNewOpen] = useState(false);
-  const [wtNewBranch, setWtNewBranch] = useState("");
-  const [wtError, setWtError] = useState<string | null>(null);
-  const [wtBusy, setWtBusy] = useState(false);
-  const [wtConfirmRemove, setWtConfirmRemove] = useState<string | null>(null);
   const [worktreeLoadingCwd, setWorktreeLoadingCwd] = useState<string | null>(null);
-  const wtDropdownRef = useRef<HTMLDivElement>(null);
-  const wtNewInputRef = useRef<HTMLInputElement>(null);
-  const [explorerOpen, setExplorerOpen] = useState(true);
+  // Folders the listing last found outside any git repository, loaded from
+  // the browser's memory of them (after a reload too: the default dated
+  // folder is one) on the first client render: while one is listed, no
+  // "checking" box shows only to go and widen the project box. The server's
+  // render reads none; the box shows only once a listing starts, client-side.
+  const nonGitCwdsRef = useRef<Set<string> | null>(null);
+  nonGitCwdsRef.current ??= new Set(loadNonGitCwds());
   const [explorerKey, setExplorerKey] = useState(0);
   const [explorerUploadBusy, setExplorerUploadBusy] = useState(false);
   const [fileSearchOpen, setFileSearchOpen] = useState(false);
   const [sessionSearchOpen, setSessionSearchOpen] = useState(false);
   const [sessionSearchQuery, setSessionSearchQuery] = useState("");
-  const sessionSearchActive = sessionSearchOpen && Boolean(sessionSearchQuery.trim());
+  const [sharingSession, setSharingSession] = useState<SessionInfo | null>(null);
+  const [exportingSession, setExportingSession] = useState<SessionInfo | null>(null);
+  const [importDialogCwd, setImportDialogCwd] = useState<string | null>(null);
   const [changesCount, setChangesCount] = useState(0);
   const [changesCollapsed, setChangesCollapsed] = useState(true);
+  const [showIgnoredFiles, setShowIgnoredFiles] = useState(false);
   const [explorerRefreshDone, setExplorerRefreshDone] = useState(false);
+  const [fileManager, setFileManager] = useState<FileManagerAvailability | null>(null);
+  const [fileManagerError, setFileManagerError] = useState<string | null>(null);
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
+  const [awaitingInputSessionIds, setAwaitingInputSessionIds] = useState<Set<string>>(() => new Set());
+  // Sessions whose subagents can still report back with a run there: not done yet (#1434).
+  const [subagentsActiveSessionIds, setSubagentsActiveSessionIds] = useState<Set<string>>(() => new Set());
   const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(() => loadUnreadSessionIds());
   const previousRunningSessionIdsRef = useRef<Set<string>>(new Set());
+  const previousActiveSessionIdsRef = useRef<Set<string>>(new Set());
   const currentSuppressedCompletionSessionIdsRef = useRef<Set<string>>(new Set());
   const previousSuppressedCompletionSessionIdsRef = useRef<Set<string>>(new Set());
   // Once polling has delivered a snapshot it is the source of truth for
@@ -435,67 +608,193 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const explorerRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fileExplorerRef = useRef<FileExplorerHandle>(null);
 
-  // Virtualized session list: only the visible window of rows is mounted.
-  const listScrollRef = useRef<HTMLDivElement>(null);
-  const explorerScrollRef = useRef<HTMLDivElement>(null);
-  useScrollbarVisibility(listScrollRef);
-  useScrollbarVisibility(explorerScrollRef, explorerOpen && Boolean(selectedCwdProp || selectedCwd));
-  const sessionPaneRef = useRef<HTMLDivElement>(null);
-  const explorerSectionRef = useRef<HTMLDivElement>(null);
-  const sessionPaneHeightRef = useRef(SESSION_PANE_DEFAULT_HEIGHT);
-  const getDefaultSessionPaneHeight = useCallback(() => {
-    if (!explorerOpen) return SESSION_PANE_DEFAULT_HEIGHT;
-    const paneHeight = sessionPaneRef.current?.getBoundingClientRect().height;
-    const explorerHeight = explorerSectionRef.current?.getBoundingClientRect().height;
-    return paneHeight && explorerHeight
-      ? Math.round((paneHeight + explorerHeight) / 2)
-      : SESSION_PANE_DEFAULT_HEIGHT;
-  }, [explorerOpen]);
-  const getMaxSessionPaneHeight = useCallback(() => {
-    if (!explorerOpen || !(selectedCwdProp || selectedCwd)) return SESSION_PANE_MAX_HEIGHT;
-    const paneHeight = sessionPaneRef.current?.getBoundingClientRect().height ?? SESSION_PANE_DEFAULT_HEIGHT;
-    const explorerHeight = explorerSectionRef.current?.getBoundingClientRect().height ?? EXPLORER_PANE_MIN_HEIGHT;
-    return Math.max(
-      SESSION_PANE_MIN_HEIGHT,
-      paneHeight + explorerHeight - EXPLORER_PANE_MIN_HEIGHT,
-    );
-  }, [explorerOpen, selectedCwd, selectedCwdProp]);
-  const sessionPaneResizer = useResizablePanel({
-    ariaLabel: t("layout.resizeSidebarSections"),
-    axis: "vertical",
-    cssVariable: "--sidebar-session-pane-height",
-    defaultWidth: SESSION_PANE_DEFAULT_HEIGHT,
-    getDefaultWidth: getDefaultSessionPaneHeight,
-    getMaxWidth: getMaxSessionPaneHeight,
-    growthDirection: "down",
-    maxWidth: SESSION_PANE_MAX_HEIGHT,
-    minWidth: SESSION_PANE_MIN_HEIGHT,
-    storageKey: "pi-web:sidebar-session-pane-height",
-    widthRef: sessionPaneHeightRef,
-  });
-  const [listViewportH, setListViewportH] = useState(0);
-  const [listScrollTop, setListScrollTop] = useState(0);
-  const [focusedSessionId, setFocusedSessionId] = useState<string | null>(null);
-  const listScrollRafRef = useRef<number | null>(null);
-  const handleListScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
-    const top = e.currentTarget.scrollTop;
-    if (listScrollRafRef.current != null) return;
-    listScrollRafRef.current = requestAnimationFrame(() => {
-      listScrollRafRef.current = null;
-      setListScrollTop(top);
-    });
+  // The files below the sessions (desktop, by default: both in view, a
+  // separator between them, the files section foldable to its header row),
+  // or Sessions | Files tabs (the setting, and always on phones), each panel
+  // shown alone. Both layouts render the same elements in the same order,
+  // only attributes and a few rows of their own differ, so a switch (the
+  // setting, the phone breakpoint) never remounts the explorer, the tree or
+  // the picker. The tab, the folded section, the group choices and the
+  // pinned section start as the server renders them and are restored from
+  // browser storage after hydration; the layout's choice is read the same
+  // way (useFilesPlacement's server snapshot).
+  const filesPlacement = useFilesPlacement();
+  const stacked = !isMobile && filesPlacement === "below";
+  const [sidebarTab, setSidebarTab] = useState<SidebarTab>("sessions");
+  const [filesCollapsed, setFilesCollapsed] = useState(false);
+  const sessionsTabRef = useRef<HTMLButtonElement>(null);
+  const filesTabRef = useRef<HTMLButtonElement>(null);
+  const sessionsPanelRef = useRef<HTMLDivElement>(null);
+  const filesPanelRef = useRef<HTMLDivElement>(null);
+  const panelScrollTopsRef = useRef(new WeakMap<Element, number>());
+  // Project groups: explicit expand/collapse choices (saved), the groups kept
+  // open for the page after they stopped being current (keepOutgoingGroupOpen;
+  // never saved), how many families "show more" has revealed per group
+  // (SHOW_MORE_STEP a click), the pinned section, the archive view.
+  const [groupExpansion, setGroupExpansion] = useState<Readonly<Record<string, boolean>>>({});
+  const [keptOpenGroups, setKeptOpenGroups] = useState<ReadonlySet<string>>(() => new Set());
+  const [moreShown, setMoreShown] = useState<Readonly<Record<string, number>>>({});
+  const [pinnedCollapsed, setPinnedCollapsed] = useState(false);
+  // The archive view's folded projects, per browser (lib/sidebar-prefs.ts).
+  const [archiveCollapsed, setArchiveCollapsed] = useState<readonly string[]>([]);
+  const [archiveView, setArchiveViewState] = useState(false);
+  // The fold and the archive view move (hooks/useSidebarMotion.ts): only
+  // when the user folds or goes in or out, never on a restore, a drag, keys,
+  // a resize or a layout switch, and not at all under reduced motion. The
+  // current values tell a change from a repeat, which starts nothing.
+  const { phase: filesFoldPhase, start: startFilesFold, end: endFilesFold } = useSidebarMotion();
+  const { phase: archivePhase, start: startArchiveMotion, end: endArchiveMotion } = useSidebarMotion();
+  const filesCollapsedRef = useRef(filesCollapsed);
+  filesCollapsedRef.current = filesCollapsed;
+  const archiveViewRef = useRef(archiveView);
+  archiveViewRef.current = archiveView;
+  const setArchiveView = useCallback((open: boolean) => {
+    if (open !== archiveViewRef.current) startArchiveMotion(open ? "in" : "out");
+    setArchiveViewState(open);
+  }, [startArchiveMotion]);
+  const filesFold = filesFoldState(filesCollapsed, filesFoldPhase);
+  const archiveMotion = archiveViewState(archiveView, archivePhase);
+  // Row states that must survive virtualization live here, not in the rows.
+  const [renamingRootId, setRenamingRootId] = useState<string | null>(null);
+  const [renamingProjectKey, setRenamingProjectKey] = useState<string | null>(null);
+  const [confirmDeleteRootId, setConfirmDeleteRootId] = useState<string | null>(null);
+  const [menu, setMenu] = useState<SidebarMenuState | null>(null);
+  // A row the main tree should scroll to (a fork's new row); see
+  // SessionTreeReveal. Held until the tree says it is done with it.
+  const [treeReveal, setTreeReveal] = useState<SessionTreeReveal | null>(null);
+  const treeRevealIdRef = useRef(0);
+  const handleRevealHandled = useCallback((id: number) => {
+    setTreeReveal((current) => (current?.id === id ? null : current));
   }, []);
-  useLayoutEffect(() => {
-    const el = listScrollRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver((entries) => {
-      for (const entry of entries) setListViewportH(entry.contentRect.height);
-    });
-    ro.observe(el);
-    setListViewportH(el.clientHeight);
-    setListScrollTop(el.scrollTop);
-    return () => ro.disconnect();
-  }, [sessionSearchActive]);
+  // The archive view's own: a project's "View archived" puts its header on top.
+  const [archiveReveal, setArchiveReveal] = useState<SessionTreeReveal | null>(null);
+  const handleArchiveRevealHandled = useCallback((id: number) => {
+    setArchiveReveal((current) => (current?.id === id ? null : current));
+  }, []);
+  const selectedSessionIdRef = useRef(selectedSessionId);
+  selectedSessionIdRef.current = selectedSessionId;
+  const [toast, setToast] = useState<SidebarToastData | null>(null);
+  const toastIdRef = useRef(0);
+  const showToast = useCallback((message: string, actions: SidebarToastAction[] = [], tail?: string) => {
+    toastIdRef.current += 1;
+    setToast({ id: toastIdRef.current, message, ...(tail ? { tail } : {}), actions });
+  }, []);
+  const [uiWriteFailures, setUiWriteFailures] = useState(0);
+  const shownUiWriteFailuresRef = useRef(0);
+  // Focus to hand to the files once they show (revealFiles): the control
+  // that asked was in the sessions tab, which hides with its focus, or the
+  // files section was folded. A request also counts when the files already
+  // show (below the sessions), hence the counter.
+  const filesFocusRef = useRef<"project-button" | "project-list" | "file-search" | null>(null);
+  const [filesFocusRequest, setFilesFocusRequest] = useState(0);
+  const contextMenuFocusRef = useRef<HTMLElement | null>(null);
+  // The composer's "Choose folder…": where the validated folder goes,
+  // and the control focus returns to when the composer does not move.
+  const folderPickRef = useRef<((target: NewSessionTarget) => void) | null>(null);
+  const folderReturnFocusRef = useRef<HTMLElement | null>(null);
+
+  // Focus to settle once a change is on the page, after the control that had
+  // it went away with that change (a toast's button, a delete confirmation's
+  // Cancel, the folder picker). Only focus that fell to <body> moves
+  // (focusIfLost): focus the user put elsewhere stays.
+  const focusAfterCommitRef = useRef<(() => HTMLElement | null) | null>(null);
+  const [focusRequest, setFocusRequest] = useState(0);
+  const focusAfterCommit = useCallback((target: () => HTMLElement | null) => {
+    focusAfterCommitRef.current = target;
+    setFocusRequest((count) => count + 1);
+  }, []);
+  useEffect(() => {
+    const target = focusAfterCommitRef.current;
+    focusAfterCommitRef.current = null;
+    if (target) focusIfLost(document, target());
+  }, [focusRequest]);
+
+  // Pins, archive and project order: pi-web's own state, kept on the server for every window.
+  const {
+    state: uiState,
+    loaded: uiStateLoaded,
+    synced: uiStateSynced,
+    error: uiStateError,
+    apply: applyUiStateRequest,
+    snapshot: snapshotUiState,
+    noteRevision: noteUiRevision,
+  } = useSessionUiState();
+
+  // The explorer's scroll container is always mounted (empty without a cwd),
+  // so the scrollbar hook stays bound to the element that is on the page.
+  const headerRef = useRef<HTMLDivElement>(null);
+  const explorerScrollRef = useRef<HTMLDivElement>(null);
+  useScrollbarVisibility(explorerScrollRef);
+  // The toolbar row's search button: always there and enabled, so focus has
+  // somewhere to go when there are no tabs (selectedTabButton).
+  const searchButtonRef = useRef<HTMLButtonElement>(null);
+
+  // The files section's height below the sessions, on the sidebar's root
+  // (--sidebar-files-height: the files panel's height, and what the toast
+  // stays above). The separator's size is the user's; a sidebar too short
+  // for it shows less without saving that (persistClamp: false). The hook
+  // runs in both layouts; only the separator and the CSS use it.
+  const sidebarRef = useRef<HTMLDivElement | null>(null);
+  const filesHeightRef = useRef(FILES_SECTION_DEFAULT_HEIGHT);
+  // What the two sections share: the sidebar under its toolbar row (the
+  // window's height before it is laid out).
+  const sidebarBodyHeight = useCallback(() => {
+    const root = sidebarRef.current;
+    const header = headerRef.current;
+    if (!root || !header || root.clientHeight === 0) return window.innerHeight - SIDEBAR_HEADER_HEIGHT;
+    return root.clientHeight - header.offsetHeight;
+  }, []);
+  const getDefaultFilesHeight = useCallback(() => Math.round(sidebarBodyHeight() * FILES_SECTION_DEFAULT_SHARE), [sidebarBodyHeight]);
+  const getMaxFilesHeight = useCallback(() => sidebarBodyHeight() - SESSIONS_SECTION_MIN_HEIGHT, [sidebarBodyHeight]);
+  const filesSizer = useResizablePanel({
+    ariaLabel: t("sidebar.resizeFiles"),
+    axis: "vertical",
+    cssVariable: "--sidebar-files-height",
+    defaultWidth: FILES_SECTION_DEFAULT_HEIGHT,
+    getDefaultWidth: getDefaultFilesHeight,
+    getMaxWidth: getMaxFilesHeight,
+    growthDirection: "up",
+    maxWidth: FILES_SECTION_MAX_HEIGHT,
+    minWidth: FILES_SECTION_MIN_HEIGHT,
+    persistClamp: false,
+    storageKey: "pi-web:sidebar-files-height",
+    widthRef: filesHeightRef,
+  });
+  const filesSizerPanelRef = filesSizer.panelRef;
+  const setSidebarRoot = useCallback((element: HTMLDivElement | null) => {
+    sidebarRef.current = element;
+    filesSizerPanelRef.current = element;
+  }, [filesSizerPanelRef]);
+  // The window is not the only thing that changes the sidebar's height (the
+  // layout coming back from tabs, the sidebar's own changes): the files'
+  // height is fitted again whenever the root resizes, so the sessions keep
+  // their minimum, and grows back to the user's size when there is room.
+  const reclampFilesHeight = filesSizer.reclampWidth;
+  useEffect(() => {
+    const root = sidebarRef.current;
+    if (!stacked || !root || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => reclampFilesHeight());
+    observer.observe(root);
+    return () => observer.disconnect();
+  }, [reclampFilesHeight, stacked]);
+
+  // Browser storage is unavailable during server rendering. Restore the
+  // sidebar preferences after hydration: read in a state initializer, a saved
+  // Files tab would make the first client render differ from the server's
+  // HTML (a hydration error, and the server markup thrown away). The group
+  // choices load before the retired keys go: the old ones move to v2 then.
+  useEffect(() => {
+    const tab = loadSidebarTab();
+    if (tab !== "sessions") setSidebarTab(tab);
+    const groups = loadGroupExpansion();
+    if (Object.keys(groups).length > 0) setGroupExpansion(groups);
+    if (loadPinnedCollapsed()) setPinnedCollapsed(true);
+    const archiveFolds = loadArchiveCollapsed();
+    if (archiveFolds.length > 0) setArchiveCollapsed(archiveFolds);
+    if (loadFilesCollapsed()) setFilesCollapsed(true);
+    if (loadShowIgnoredFiles()) setShowIgnoredFiles(true);
+    forgetRetiredSidebarKeys();
+  }, []);
 
   const loadSessions = useCallback(async (showLoading = false, force = false, summary = false) => {
     const loadId = ++sessionLoadIdRef.current;
@@ -509,24 +808,28 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         sessions: SessionInfo[];
         sessionListVersion: number;
         runningSessionIds?: string[];
+        awaitingInputSessionIds?: string[];
         completionNotificationSuppressedSessionIds?: string[];
       };
       if (loadId !== sessionLoadIdRef.current) return;
       sessionListVersionRef.current = data.sessionListVersion;
       setAllSessions(data.sessions);
+      if (!summary) setSessionDetailsLoaded(true);
       // Treat the fetched running set as an initial fallback only. Once the
       // lightweight poll is live, a slow session-list fetch cannot overwrite it.
       if (!runningPollAuthoritativeRef.current) {
         currentSuppressedCompletionSessionIdsRef.current = new Set(
           data.completionNotificationSuppressedSessionIds ?? [],
         );
-        setRunningSessionIds(new Set(data.runningSessionIds ?? []));
+        setRunningSessionIds((previous) => sameIdsOr(previous, data.runningSessionIds ?? []));
+        setAwaitingInputSessionIds((previous) => sameIdsOr(previous, data.awaitingInputSessionIds ?? []));
       }
-      // Drop markers for deleted sessions and for subagents, whose completion
-      // is intentionally silent even if an older client marked them unread.
+      // Drop markers for deleted sessions and for hidden family members
+      // (subagents, side chats), whose completion is intentionally silent
+      // even if an older client marked them unread.
       const unreadEligibleIds = new Set(
         data.sessions
-          .filter((session) => session.relation?.kind !== "subagent")
+          .filter((session) => !isHiddenRelation(session.relation))
           .map((session) => session.id),
       );
       setUnreadSessionIds((prev) => {
@@ -560,7 +863,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         }, SESSION_DETAILS_HYDRATION_DELAY_MS);
       });
     } else {
-      void loadSessions(false, true);
+      // Every refreshKey bump follows a change the server already invalidated
+      // the list for (a run's agent_end, a fork, a delete, a name, a new
+      // session). Forcing would rescan again and bump the version, so every
+      // other open tab would reload the list once more.
+      void loadSessions();
     }
 
     return () => {
@@ -572,17 +879,77 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     };
   }, [loadSessions, refreshKey]);
 
-  // Browser storage is unavailable during server rendering. Restore the panel
-  // preference after hydration so a collapsed explorer stays collapsed on reload.
+  // Only the server can raise a file-manager window, and only when the browser
+  // runs on that same machine. Ask it once so the button can pick the right
+  // label (Explorer / Finder / generic) and disable itself when unavailable.
   useEffect(() => {
-    setExplorerOpen(loadExplorerOpen());
+    let cancelled = false;
+    fetch("/api/open-in-explorer")
+      .then((res) => res.ok ? res.json() as Promise<FileManagerAvailability> : null)
+      .then((data) => { if (!cancelled && data) setFileManager(data); })
+      .catch(() => {});
+    return () => { cancelled = true; };
   }, []);
+
+  // A failure belongs to the project it happened on.
+  useEffect(() => {
+    setFileManagerError(null);
+  }, [selectedCwd, selectedCwdProp]);
+
+  /** Resolves true when it failed: the message is then in the files' body. */
+  const openInFileManager = useCallback(async (): Promise<boolean> => {
+    const dir = selectedCwd ?? selectedCwdProp;
+    if (!dir) return false;
+    try {
+      const res = await fetch("/api/open-in-explorer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cwd: dir }),
+      });
+      if (res.ok) {
+        setFileManagerError(null);
+        return false;
+      }
+      const data = await res.json().catch(() => ({})) as { error?: string };
+      setFileManagerError(data.error ?? `HTTP ${res.status}`);
+    } catch (error) {
+      setFileManagerError(error instanceof Error ? error.message : String(error));
+    }
+    return true;
+  }, [selectedCwd, selectedCwdProp]);
+
+  const fileManagerLabel = t(
+    fileManager?.platform === "darwin"
+      ? "sidebar.openInFinder"
+      : fileManager?.platform === "win32"
+        ? "sidebar.openInExplorer"
+        : "sidebar.openInFileManager",
+  );
+  const fileManagerUnavailable = fileManager?.supported === false;
+  const fileManagerErrorMessage = fileManagerError
+    ? t(FILE_MANAGER_ERROR_KEYS[fileManagerError] ?? fileManagerError)
+    : null;
 
   // Persist unread markers so they survive a browser refresh before the user
   // has actually opened the completed session.
   useEffect(() => {
     saveUnreadSessionIds(unreadSessionIds);
   }, [unreadSessionIds]);
+
+  // Another tab's read or mark-unread of the same session: its localStorage
+  // write is the only cross-tab notice there is, and the browser fires the
+  // storage event only in the tabs that did not write. Without adopting the
+  // written set here, a session read in the other tab keeps its dot in this
+  // one, and this tab's next local write would persist the stale marker
+  // again, resurrecting it everywhere after a refresh.
+  useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== null && event.key !== UNREAD_SESSIONS_STORAGE_KEY) return;
+      setUnreadSessionIds((prev) => sameIdsOr(prev, [...parseUnreadSessionIds(event.newValue)]));
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
 
   useEffect(() => {
     let stopped = false;
@@ -605,32 +972,51 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       const current = new AbortController();
       controller?.abort();
       controller = current;
+      // The debug panel's record of this poll (noteRunningPoll() in the finally): the request
+      // alone, up to its answer, without the session-list reload that may follow.
+      const startedAt = Date.now();
+      let answeredAt: number | null = null;
+      let outcome: "ok" | "error" | "aborted" = "error";
+      let httpStatus: number | null = null;
       try {
         const res = await fetch("/api/agent/running", {
           cache: "no-store",
           signal: current.signal,
         });
+        httpStatus = res.status;
         if (!res.ok) return;
+        outcome = "ok";
         const data = await res.json() as {
           sessionListVersion: number;
           runningSessionIds?: string[];
+          awaitingInputSessionIds?: string[];
           completionNotificationSuppressedSessionIds?: string[];
+          subagentsActiveSessionIds?: string[];
+          sessionUiStateRevision?: number | null;
         };
+        answeredAt = Date.now();
         if (stopped || controller !== current) return;
         runningPollAuthoritativeRef.current = true;
         currentSuppressedCompletionSessionIdsRef.current = new Set(
           data.completionNotificationSuppressedSessionIds ?? [],
         );
-        setRunningSessionIds(new Set(data.runningSessionIds ?? []));
+        setRunningSessionIds((previous) => sameIdsOr(previous, data.runningSessionIds ?? []));
+        setAwaitingInputSessionIds((previous) => sameIdsOr(previous, data.awaitingInputSessionIds ?? []));
+        setSubagentsActiveSessionIds((previous) => sameIdsOr(previous, data.subagentsActiveSessionIds ?? []));
+        // Pins and archive changed in another window: reload them.
+        noteUiRevision(data.sessionUiStateRevision);
         if (data.sessionListVersion !== sessionListVersionRef.current) {
           // Reuse the invalidated cache; forcing a scan would change the version again.
           await loadSessions();
         }
       } catch {
         // Keep the last known state; the next visible-tab poll retries.
+        outcome = current.signal.aborted ? "aborted" : "error";
       } finally {
         if (controller === current) controller = null;
         schedule();
+        // Assignments only, after the next poll is scheduled: it cannot change how polling goes on.
+        noteRunningPoll(startedAt, outcome, httpStatus, answeredAt);
       }
     };
 
@@ -652,7 +1038,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       controller?.abort();
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [loadSessions]);
+  }, [loadSessions, noteUiRevision]);
 
   useEffect(() => {
     onRunningSessionIdsChange?.(runningSessionIds);
@@ -662,15 +1048,33 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     onSessionsChange?.(allSessions);
   }, [allSessions, onSessionsChange]);
 
+  // The tab strip's favicon mirrors what the rows show (#1483): a persistent
+  // badge after the completion sound fades, cleared the same way the blue dot is.
+  // Sessions that finished while the tab was hidden count too (#1484): the rows
+  // exclude the selected session ("already looking"), which is false while hidden.
+  useEffect(() => {
+    syncFaviconBadge({
+      awaiting: awaitingInputSessionIds.size,
+      unread: countFaviconUnread(unreadSessionIds, hiddenFinishedSessionIds),
+    });
+  }, [awaitingInputSessionIds, unreadSessionIds, hiddenFinishedSessionIds]);
+
   useEffect(() => {
     const previous = previousRunningSessionIdsRef.current;
     const completedInBackground = [...previous].filter((id) => !runningSessionIds.has(id) && id !== selectedSessionId);
+    // A session is done once it neither runs nor waits for a subagent's report, which starts
+    // another run there: its first run's end is not the task's (#1434). Leaving that set is the
+    // completion, so a last run too short for any poll to see still counts.
+    const active = new Set([...runningSessionIds, ...subagentsActiveSessionIds]);
+    const finishedInBackground = [...previousActiveSessionIdsRef.current].filter((id) => !active.has(id) && id !== selectedSessionId);
+    // Subagent runs and side chats finish silently: a side chat is an aside
+    // the user drives, not a background task that owes a notification.
     const knownSubagentIds = new Set(
       allSessions
-        .filter((session) => session.relation?.kind === "subagent")
+        .filter((session) => isHiddenRelation(session.relation))
         .map((session) => session.id),
     );
-    const completedWithNotifications = completedInBackground.filter(
+    const completedWithNotifications = finishedInBackground.filter(
       (id) => !previousSuppressedCompletionSessionIdsRef.current.has(id) && !knownSubagentIds.has(id),
     );
     const newlyRunning = [...runningSessionIds].filter((id) => !previous.has(id));
@@ -686,20 +1090,27 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     const hasUnlistedRunningSession = newlyRunning.some(
       (id) => !allSessions.some((session) => session.id === id),
     );
+    // Not forced: a run's agent_end has already invalidated the server's list,
+    // and a forced rescan here, in every tab not showing that session, bumped
+    // the version again and made all the others reload once more.
     if (completedInBackground.length > 0 || hasUnlistedRunningSession) {
-      loadSessions(false, true);
+      void loadSessions();
     }
     if (completedWithNotifications.length > 0) {
       onBackgroundTaskDone?.();
     }
 
     previousRunningSessionIdsRef.current = runningSessionIds;
+    previousActiveSessionIdsRef.current = active;
+    const previousSuppressed = previousSuppressedCompletionSessionIdsRef.current;
     previousSuppressedCompletionSessionIdsRef.current = new Set(
-      [...runningSessionIds].filter(
-        (id) => currentSuppressedCompletionSessionIdsRef.current.has(id) || knownSubagentIds.has(id),
+      [...active].filter(
+        (id) => currentSuppressedCompletionSessionIdsRef.current.has(id) || knownSubagentIds.has(id)
+          // A subagent waiting for its own subagents is no longer listed as suppressed.
+          || (previousSuppressed.has(id) && !runningSessionIds.has(id)),
       ),
     );
-  }, [runningSessionIds, selectedSessionId, allSessions, loadSessions, onBackgroundTaskDone]);
+  }, [runningSessionIds, subagentsActiveSessionIds, selectedSessionId, allSessions, loadSessions, onBackgroundTaskDone]);
 
   useEffect(() => {
     if (!selectedSessionId) return;
@@ -722,35 +1133,22 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   }, []);
 
   const restoredRef = useRef(false);
-
-  const projectSelection = useCallback((root: string, key: string): ProjectSelection => ({
-    root,
-    key,
-  }), []);
+  // 「删除工作区」删掉最后一个可选项目后，侧边栏回到「没有选中项目」。下面的
+  // 首次自动选择按 getRecentProjects 挑最近的项目（归档的会话也算数），会把刚删的
+  // 又选回来，所以这个状态要记住，直到用户重新选了项目。
+  const projectClearedRef = useRef(false);
+  useEffect(() => {
+    if (selectedCwd) projectClearedRef.current = false;
+  }, [selectedCwd]);
 
   /** Resolve both display root and stable identity from server-provided data. */
-  const projectFor = useCallback((cwd: string | null): ProjectSelection | null => {
-    if (!cwd) return null;
-    // /api/cwd/validate resolves identity before a custom path becomes active,
-    // preventing one render with a raw path key from looking like a switch.
-    if (validatedProject?.cwd === cwd) {
-      return projectSelection(validatedProject.root, validatedProject.key);
-    }
-    if (worktreeState && worktreeState.forCwd === cwd) {
-      return projectSelection(worktreeState.projectRoot, worktreeState.projectKey);
-    }
-    // Any path in the loaded worktree list belongs to that project — covers
-    // worktrees without sessions, so switching to them keeps the row mounted.
-    if (worktreeState?.worktrees.some((w) => w.path === cwd)) {
-      return projectSelection(worktreeState.projectRoot, worktreeState.projectKey);
-    }
-    const match = allSessions.find((session) => (
-      session.cwd === cwd || (session.projectRoot ?? session.cwd) === cwd
-    ));
-    return match
-      ? projectSelection(match.projectRoot ?? match.cwd, workspaceKeyOf(match))
-      : projectSelection(cwd, cwd);
-  }, [validatedProject, worktreeState, allSessions, projectSelection]);
+  const projectFor = useCallback((cwd: string | null): ProjectSelection | null => (
+    cwd ? projectForCwd(cwd, { validated: validatedProject, listing: worktreeState, sessions: allSessions }) : null
+  ), [validatedProject, worktreeState, allSessions]);
+
+  // The project of the sidebar's cwd: the files tab shows it, and its group in
+  // the sessions tab exists even before it has a session.
+  const selectedProject = useMemo(() => projectFor(selectedCwd), [projectFor, selectedCwd]);
 
   // A worktree/session refresh can hydrate the stable key without changing
   // cwd, so notify when either changes. The parent treats same-cwd key changes
@@ -769,12 +1167,19 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   }, [selectedCwd, onCwdChange, projectFor]);
 
   // Sync the worktree switcher to the selected session's cwd. Sessions of all
-  // worktrees in a project share one list, so clicking a session from another
+  // worktrees in a project share one group, so clicking a session from another
   // worktree should move the effective cwd there. Only fires when the prop
-  // value changes, so a manual switcher change is not snapped back.
+  // value changes, so a manual switcher change is not snapped back. The prop
+  // goes null when the shell switches project from here; forgetting the last
+  // value then lets a restored session in a worktree that was synced before
+  // move the cwd again, so the files tab shows the checkout the chat uses.
   const lastSyncedCwdPropRef = useRef<string | null>(null);
   useEffect(() => {
-    if (selectedCwdProp && selectedCwdProp !== lastSyncedCwdPropRef.current) {
+    if (!selectedCwdProp) {
+      lastSyncedCwdPropRef.current = null;
+      return;
+    }
+    if (selectedCwdProp !== lastSyncedCwdPropRef.current) {
       lastSyncedCwdPropRef.current = selectedCwdProp;
       setSelectedCwd(selectedCwdProp);
     }
@@ -799,6 +1204,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           setWorktreeState(null);
           return;
         }
+        if (d.isGit) nonGitCwdsRef.current?.delete(selectedCwd);
+        else nonGitCwdsRef.current?.add(selectedCwd);
+        rememberCwdGitStatus(selectedCwd, Boolean(d.isGit));
         setWorktreeState({
           forCwd: selectedCwd,
           projectRoot: d.projectRoot,
@@ -820,7 +1228,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
   // Auto-select cwd and restore session from URL on first load
   useEffect(() => {
-    if (allSessions.length === 0 || skipInitialProjectSelection) return;
+    if (allSessions.length === 0 || skipInitialProjectSelection || projectClearedRef.current) return;
 
     if (selectedCwd === null) {
       // If restoring a session, set cwd to match that session
@@ -834,11 +1242,12 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         }
         // Session not found — notify parent so it can show the placeholder
         onInitialRestoreDone?.();
+        if (initialSessionLinked) showToast(t("sidebar.sessionNotFound"));
       }
       const projects = getRecentProjects(allSessions);
       if (projects.length > 0) setSelectedCwd(projects[0].root);
     }
-  }, [allSessions, selectedCwd, initialSessionId, skipInitialProjectSelection, onSelectSession, onInitialRestoreDone]);
+  }, [allSessions, selectedCwd, initialSessionId, initialSessionLinked, skipInitialProjectSelection, onSelectSession, onInitialRestoreDone, showToast, t]);
 
   // Prefer an exact UI selection while a refetch is in flight. Once the
   // response catches up, the server-resolved path handles Windows case and
@@ -852,9 +1261,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     : undefined;
   const currentWorktreePath = currentWorktree?.path ?? null;
 
-  const commitCustomPath = useCallback(async (candidate?: string) => {
+  // `purpose`: who asked, the folder picker's opener by default ("Use default directory" names its own).
+  // 返回是否选定成功：系统对话框选出的路径校验没过时，调用方据此改开应用内选择器去显示原因。
+  const commitCustomPath = useCallback(async (candidate?: string, { remember = true, purpose = customPathOpen } = {}): Promise<boolean> => {
     const path = (candidate ?? customPathValue).trim();
-    if (!path || customPathValidating) return;
+    if (!path || customPathValidating) return false;
 
     setCustomPathValidating(true);
     setCustomPathError(null);
@@ -872,1121 +1283,2148 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       };
       if (!res.ok || data.error || !data.cwd || !data.projectRoot || !data.projectKey) {
         setCustomPathError(data.error ?? `HTTP ${res.status}`);
-        return;
+        return false;
+      }
+      if (remember) {
+        saveLastCustomCwd(data.cwd);
+        setCustomPathValue(data.cwd);
+      }
+      setCustomPathOpen(false);
+      if (purpose === "new-session") {
+        // The composer's bar asked: the shell decides whether its fresh
+        // composer moves there, and the sidebar's cwd moves only with it.
+        const pick = folderPickRef.current;
+        const opener = folderReturnFocusRef.current;
+        folderPickRef.current = null;
+        folderReturnFocusRef.current = null;
+        pick?.({ cwd: data.cwd, projectKey: data.projectKey, projectRoot: data.projectRoot });
+        // Not moved (the folder in use): the bar's control takes focus back.
+        focusAfterCommit(() => (opener?.isConnected ? opener : null));
+        return true;
       }
       setValidatedProject({
         cwd: data.cwd,
         root: data.projectRoot,
         key: data.projectKey,
       });
-      saveLastCustomCwd(data.cwd);
-      setCustomPathValue(data.cwd);
       setSelectedCwd(data.cwd);
-      setCustomPathOpen(false);
-      setDropdownOpen(false);
+      return true;
     } catch (e) {
       setCustomPathError(e instanceof Error ? e.message : String(e));
+      return false;
     } finally {
       setCustomPathValidating(false);
     }
-  }, [customPathValue, customPathValidating]);
+  }, [customPathOpen, customPathValue, customPathValidating, focusAfterCommit]);
+
+  // 关掉应用内选择器，把焦点还给输入栏上方的入口；系统对话框取消时走同一条路。
+  const closeFolderPicker = useCallback((purpose: false | "files" | "new-session") => {
+    // The composer's "Choose folder…" puts focus back on its
+    // control: the picker took it and leaves nothing behind.
+    const opener = purpose === "new-session" ? folderReturnFocusRef.current : null;
+    folderPickRef.current = null;
+    folderReturnFocusRef.current = null;
+    setCustomPathOpen(false);
+    setCustomPathError(null);
+    if (opener) focusAfterCommit(() => (opener.isConnected ? opener : null));
+  }, [focusAfterCommit]);
+
+  // 选文件夹的入口：本机先弹系统的选择器（Finder 那种，有收藏夹、搜索、新建文件夹），
+  // 远程访问、不支持的平台、出错时再回到应用内的 DirectoryPicker。
+  // 记住「这里没有系统对话框」，之后直接开应用内选择器，不必每次先碰一次 403。
+  const nativeFolderUnavailableRef = useRef(false);
+  const chooseFolder = useCallback(async (purpose: "files" | "new-session") => {
+    setCustomPathError(null);
+    if (!nativeFolderUnavailableRef.current) {
+      const choice = await chooseFolderNatively(t("directoryPicker.selectDirectory"));
+      // 已经有一个对话框开着：它会给出结果，这次点击什么也不做。
+      if (choice === "busy") return;
+      if (choice === "cancelled") {
+        closeFolderPicker(purpose);
+        return;
+      }
+      if (choice !== "unavailable") {
+        // 系统对话框只给路径：校验和选定仍走 commitCustomPath；没过就交给应用内选择器显示原因。
+        if (await commitCustomPath(choice.path, { purpose })) return;
+        setCustomPathValue(choice.path);
+        setCustomPathOpen(purpose);
+        return;
+      }
+      nativeFolderUnavailableRef.current = true;
+    }
+    setCustomPathOpen(purpose);
+  }, [closeFolderPicker, commitCustomPath, t]);
+  // The composer's bar asks through the handle, which is made once.
+  const chooseFolderRef = useRef(chooseFolder);
+  chooseFolderRef.current = chooseFolder;
 
   const handleCustomPathClick = useCallback(() => {
-    setCustomPathOpen(true);
-    setCustomPathError(null);
-    setDropdownOpen(false);
-  }, []);
-  const handleDefaultCwd = useCallback(async () => {
+    void chooseFolder("files");
+  }, [chooseFolder]);
+  const handleDefaultCwd = useCallback(async (purpose: "files" | "new-session" = "files") => {
     try {
       const res = await fetch("/api/default-cwd", { method: "POST" });
       const data = await res.json() as { cwd?: string; error?: string };
-      if (data.cwd) {
-        setSelectedCwd(data.cwd);
-        setCustomPathOpen(false);
-        setCustomPathError(null);
-        setDropdownOpen(false);
-      }
+      // Select it like any other directory, so validation, project identity and
+      // the file allow-list all go through /api/cwd/validate. It is not a path
+      // the user typed, so the custom-path picker does not remember it.
+      if (data.cwd) await commitCustomPath(data.cwd, { remember: false, purpose });
     } catch {
       // ignore
     }
-  }, []);
+  }, [commitCustomPath]);
+  // The composer's bar asks through the handle, which is made once.
+  const handleDefaultCwdRef = useRef(handleDefaultCwd);
+  handleDefaultCwdRef.current = handleDefaultCwd;
 
-  const handleCreateWorktree = useCallback(async () => {
-    const branch = wtNewBranch.trim();
-    if (!branch || wtBusy || !worktreeState) return;
-    setWtBusy(true);
-    setWtError(null);
+  // Both pickers create through here: the worktree is listed at once, so
+  // projectFor() keeps it in the project before the refetch lands, and
+  // listed even when nobody moves there. The picker moves there itself.
+  const createWorktree = useCallback(async (project: ProjectChoice, branch: string): Promise<{ path: string } | { error: string }> => {
     try {
       const res = await fetch("/api/worktrees", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd: worktreeState.projectRoot, branch }),
+        body: JSON.stringify({ cwd: project.root, branch }),
       });
-      const data = await res.json().catch(() => ({})) as { path?: string; error?: string };
+      const data = await res.json().catch(() => ({})) as { path?: string; error?: string; code?: string; branch?: string; worktreePath?: string };
       if (!res.ok || data.error || !data.path) {
-        setWtError(data.error ?? `HTTP ${res.status}`);
-        return;
+        const failure = worktreeCreateFailure(data, res.status);
+        return "key" in failure
+          ? { error: t(failure.key, { ...failure.params, path: shortenPath(failure.params.path) }) }
+          : failure;
       }
-      setWtNewOpen(false);
-      setWtNewBranch("");
-      setWtDropdownOpen(false);
-      // Optimistically register the new worktree so projectFor() resolves
-      // it to the main repo before the refetch lands (keeps AppShell from
-      // treating the new cwd as a different project).
-      setWorktreeState((prev) => prev ? {
-        ...prev,
-        forCwd: data.path!,
-        currentWorktreePath: data.path!,
-        worktrees: [...prev.worktrees, { path: data.path!, branch, isMain: false }],
-      } : prev);
-      setSelectedCwd(data.path);
+      const path = data.path;
+      setWorktreeState((prev) => (prev && prev.projectKey === project.key && !prev.worktrees.some((worktree) => worktree.path === path)
+        ? { ...prev, worktrees: [...prev.worktrees, { path, branch, isMain: false }] }
+        : prev));
       setWtRefreshKey((k) => k + 1);
+      return { path };
     } catch (e) {
-      setWtError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setWtBusy(false);
+      return { error: e instanceof Error ? e.message : String(e) };
     }
-  }, [wtNewBranch, wtBusy, worktreeState]);
+  }, [t]);
 
-  const handleRemoveWorktree = useCallback(async (path: string, force: boolean) => {
-    if (!worktreeState || wtBusy) return;
-    setWtBusy(true);
-    setWtError(null);
+  // The files tab's remove button. A checkout with changes answers "dirty",
+  // and the picker asks before retrying with force.
+  const handleRemoveWorktree = useCallback(async (project: ProjectChoice, path: string, force: boolean): Promise<WorktreeRemoval> => {
     try {
       const res = await fetch("/api/worktrees", {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd: worktreeState.projectRoot, path, force }),
+        body: JSON.stringify({ cwd: project.root, path, force }),
       });
       const data = await res.json().catch(() => ({})) as { error?: string; dirty?: boolean };
       if (!res.ok) {
-        if (data.dirty && !force) {
-          // Dirty worktree — ask the user to confirm a force removal
-          setWtConfirmRemove(path);
-          return;
-        }
-        setWtError(data.error ?? `HTTP ${res.status}`);
-        return;
+        if (data.dirty && !force) return "dirty";
+        return { error: data.error ?? `HTTP ${res.status}` };
       }
-      setWtConfirmRemove(null);
-      if (currentWorktreePath === path) setSelectedCwd(worktreeState.projectRoot);
+      if (currentWorktreePath === path) setSelectedCwd(project.root);
       setWtRefreshKey((k) => k + 1);
+      return "removed";
     } catch (e) {
-      setWtError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setWtBusy(false);
+      return { error: e instanceof Error ? e.message : String(e) };
     }
-  }, [worktreeState, wtBusy, currentWorktreePath]);
+  }, [currentWorktreePath]);
 
-  // Close dropdowns on outside click
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
-        setDropdownOpen(false);
-        setProjectFilter("");
-      }
-      if (wtDropdownRef.current && !wtDropdownRef.current.contains(e.target as Node)) {
-        setWtDropdownOpen(false);
-        setWtNewOpen(false);
-        setWtNewBranch("");
-        setWtError(null);
-        setWtConfirmRemove(null);
-        setWtFilter("");
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
+  const refreshWorktrees = useCallback(() => setWtRefreshKey((k) => k + 1), []);
+
+  // The files tab's picks move the sidebar's cwd, with the identity the
+  // picker read from the project list or the worktree listing: a pinned
+  // project without sessions keeps its server key, as in startNewSessionIn.
+  const handleFilesPick = useCallback(({ cwd, projectKey, projectRoot }: NewSessionTarget) => {
+    if (projectKey && projectRoot) setValidatedProject({ cwd, root: projectRoot, key: projectKey });
+    setSelectedCwd(cwd);
   }, []);
 
   // Clicking a session moves the effective cwd to that session's worktree.
   // Done on the click path (not via the selectedCwd prop sync) so it also
   // works when the prop value won't change — e.g. re-clicking the already
   // open session after manually switching worktrees.
-  const handleSelectSessionFromList = useCallback((s: SessionInfo, entryId?: string, blockIndex?: number) => {
+  const handleSelectSessionFromList = useCallback((s: SessionInfo, entryId?: string, blockIndex?: number, options?: SelectSessionOptions) => {
     setAllSessions((current) => current.some((session) => session.id === s.id) ? current : [s, ...current]);
     if (s.cwd) setSelectedCwd(s.cwd);
-    onSelectSession(s, false, entryId, blockIndex);
+    onSelectSession(s, false, entryId, blockIndex, options);
   }, [onSelectSession]);
 
+  // Every "new session" goes through here. The cwd moves first, on the click
+  // path like a session pick, and the shell gets the target's project so it
+  // adopts it up front: a session in another project closes the previous
+  // project's file tabs instead of being mistaken for identity hydration.
+  const startNewSessionIn = useCallback(({ cwd, projectKey, projectRoot, carryComposer }: NewSessionTarget) => {
+    // A worktree without sessions has no other source of identity yet.
+    if (projectKey && projectRoot) setValidatedProject({ cwd, root: projectRoot, key: projectKey });
+    setSelectedCwd(cwd);
+    onNewSession?.(createTempSessionId(), cwd, projectKey, carryComposer ? { carryComposer: true } : undefined);
+  }, [onNewSession]);
+  // The handle below is made once: it calls the newest closure.
+  const startNewSessionInRef = useRef(startNewSessionIn);
+  startNewSessionInRef.current = startNewSessionIn;
+
+  useImperativeHandle(controlRef, () => ({
+    startNewSessionIn: (target) => startNewSessionInRef.current(target),
+    openFolderForNewSession: (onPicked, returnFocusTo) => {
+      folderPickRef.current = onPicked;
+      folderReturnFocusRef.current = returnFocusTo;
+      void chooseFolderRef.current("new-session");
+    },
+    openDefaultDirectoryForNewSession: (onPicked) => {
+      folderPickRef.current = onPicked;
+      folderReturnFocusRef.current = null;
+      void handleDefaultCwdRef.current("new-session");
+    },
+    refreshWorktrees,
+    createWorktree,
+  }), [createWorktree, refreshWorktrees]);
+
+  // Header "+": a new session in the sidebar's current cwd (worktree).
   const handleNewSession = useCallback(() => {
     if (!selectedCwd) return;
-    // Generate a temporary UUID client-side — no backend call needed.
-    // Pi will be spawned lazily when the user sends the first message.
-    const tempId = typeof crypto.randomUUID === "function"
-      ? crypto.randomUUID()
-      : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
-    onNewSession?.(tempId, selectedCwd);
-  }, [selectedCwd, onNewSession]);
+    startNewSessionIn({ cwd: selectedCwd });
+  }, [selectedCwd, startNewSessionIn]);
 
-  const recentProjects = getRecentProjects(allSessions);
-  const showProjectFilter = recentProjects.length > 8;
-  const visibleProjects = projectFilter.trim()
-    ? recentProjects.filter((project) => project.root.toLowerCase().includes(projectFilter.trim().toLowerCase()))
-    : recentProjects;
+  const recentProjects = useMemo(() => getRecentProjects(allSessions), [allSessions]);
 
-  // Sessions of every worktree in the selected project are shown together
-  const selectedProject = projectFor(selectedCwd);
+  const sessionFamilies = useMemo(() => listSessionFamilies(allSessions), [allSessions]);
+  const familyByRootId = useMemo(
+    () => new Map(sessionFamilies.map((family) => [family.root.id, family])),
+    [sessionFamilies],
+  );
 
-  // Per-project activity counts (running / unread) for the workspace selector.
-  // Uses the same stable server key as the project list and filtering.
+  // Every session id of an archived family (search tags them), and how many
+  // families each project has in the archive.
+  const archiveIndex = useMemo(() => {
+    const ids = new Set<string>();
+    const countByProject = new Map<string, number>();
+    for (const family of sessionFamilies) {
+      if (!isFamilyArchived(family, uiState, runningSessionIds)) continue;
+      for (const id of familyIds(family)) ids.add(id);
+      const key = workspaceKeyOf(family.root);
+      countByProject.set(key, (countByProject.get(key) ?? 0) + 1);
+    }
+    return { ids, countByProject };
+  }, [sessionFamilies, uiState, runningSessionIds]);
+
+  // Per-project activity counts (running / unread) for the files tab's project menu.
+  // Uses the same stable server key as the project list and filtering. An
+  // archived family is out of sight, so it does not count as activity.
   const projectActivity = useMemo(
-    () => getProjectActivity(allSessions, runningSessionIds, unreadSessionIds),
-    [allSessions, runningSessionIds, unreadSessionIds],
-  );
-
-  // Any activity in a project other than the one currently selected — shown as
-  // a dot on the (collapsed) selector button so it is visible without opening
-  // the dropdown.
-  const hasOtherWorkspaceActivity = useMemo(
-    () => [...projectActivity.entries()].some(
-      ([key, { running, unread }]) => key !== selectedProject?.key && (running > 0 || unread > 0),
+    () => getProjectActivity(
+      archiveIndex.ids.size === 0 ? allSessions : allSessions.filter((session) => !archiveIndex.ids.has(session.id)),
+      runningSessionIds,
+      unreadSessionIds,
     ),
-    [projectActivity, selectedProject],
+    [allSessions, archiveIndex, runningSessionIds, unreadSessionIds],
   );
 
-  const filteredSessions = selectedProject
-    ? sessionsForProject(allSessions, selectedProject.key)
-    : allSessions;
   const showWorktreeSwitcher = Boolean(
     worktreeState?.isGit
     && worktreeState.isTopLevel
     && selectedCwd
     && selectedProject?.key === worktreeState.projectKey
   );
+  // A subdirectory of a git checkout keeps a disabled box saying why it has
+  // no worktrees (its root has them). A folder outside any repository has
+  // no worktree box at all: the project box takes the whole row.
   const worktreeGuide = selectedCwd
-    && worktreeState
+    && worktreeState?.isGit
     && selectedProject?.key === worktreeState.projectKey
     && !showWorktreeSwitcher
-    ? (worktreeState.isGit
-        ? {
-             label: t("sidebar.openRepoRoot"),
-             title: t("sidebar.openRepoRootTitle"),
-          }
-        : {
-             label: t("sidebar.gitRepoRootOnly"),
-             title: t("sidebar.gitRepoRootOnlyTitle"),
-          })
+    ? {
+        label: t("sidebar.openRepoRoot"),
+        title: t("sidebar.openRepoRootTitle"),
+      }
     : null;
   const worktreeLoading = Boolean(selectedCwd && worktreeLoadingCwd === selectedCwd);
   const inactiveWorktreeSelector = worktreeGuide
-    ?? (worktreeLoading && !showWorktreeSwitcher
+    ?? (worktreeLoading && !showWorktreeSwitcher && !(selectedCwd && nonGitCwdsRef.current?.has(selectedCwd))
       ? {
            label: t("sidebar.worktrees"),
            title: t("sidebar.checkingWorktrees"),
         }
       : null);
 
-  const sessionFamilies = listSessionFamilies(filteredSessions);
+  // The tree of every project. Its group for the current project exists even
+  // without sessions (a fresh custom path, a new worktree).
+  const currentProjectKey = selectedProject?.key ?? null;
+  const currentProjectRoot = selectedProject?.root ?? null;
+  const currentProject = useMemo(
+    () => (currentProjectKey && currentProjectRoot ? { key: currentProjectKey, root: currentProjectRoot } : null),
+    [currentProjectKey, currentProjectRoot],
+  );
+  // What the tree shows and every toggle reads: the saved choices over the
+  // groups kept open for the page. Writes go to the saved choices alone
+  // (saveGroupChoices).
+  const shownGroupExpansion = useMemo(
+    () => effectiveGroupExpansion(groupExpansion, keptOpenGroups),
+    [groupExpansion, keptOpenGroups],
+  );
+  const model = useMemo(() => buildSessionTree({
+    sessions: allSessions,
+    uiState,
+    runningIds: runningSessionIds,
+    awaitingIds: awaitingInputSessionIds,
+    unreadIds: unreadSessionIds,
+    selectedSessionId,
+    currentProject,
+    groupExpansion: shownGroupExpansion,
+    moreShown,
+    pinnedCollapsed,
+  }), [allSessions, uiState, runningSessionIds, awaitingInputSessionIds, unreadSessionIds, selectedSessionId, currentProject, shownGroupExpansion, moreShown, pinnedCollapsed]);
+  // Built while the archive view is rendered, its way out included: it
+  // leaves as it was, not empty.
+  const archiveMounted = archiveMotion.archiveMounted;
+  const archiveCollapsedSet = useMemo(() => new Set(archiveCollapsed), [archiveCollapsed]);
+  const archiveRows = useMemo(() => (archiveMounted ? buildArchiveRows({
+    sessions: allSessions,
+    uiState,
+    runningIds: runningSessionIds,
+    awaitingIds: awaitingInputSessionIds,
+    unreadIds: unreadSessionIds,
+    selectedSessionId,
+    currentProject,
+    collapsed: archiveCollapsedSet,
+  }) : []), [archiveMounted, allSessions, uiState, runningSessionIds, awaitingInputSessionIds, unreadSessionIds, selectedSessionId, currentProject, archiveCollapsedSet]);
+  // The archive's projects, top to bottom, folded or not.
+  const archiveGroups = useMemo(
+    () => archiveRows.flatMap((row) => (row.kind === "archive-group" ? [row] : [])),
+    [archiveRows],
+  );
+  const projectByKey = useMemo(
+    () => new Map(model.projects.map((project) => [project.key, project])),
+    [model.projects],
+  );
 
-  const virtualIndices = getSessionListIndices(
-    sessionFamilies.length,
-    listScrollTop,
-    listViewportH,
-    sessionFamilies.findIndex((family) => family.root.id === focusedSessionId),
+  // The project order is saved as projects turn up: a project without a place
+  // renders at the top of its band, and saving it puts it at the top of the
+  // list, so nothing moves on screen; from then on only a drag or Move up/down
+  // moves it. The first save (an empty order) records the activity order the
+  // user sees. It waits for real server state (a failed GET leaves the local
+  // state empty: archived projects would count as live) and for the session
+  // details (the summary rows' times are file mtimes). When more keys wait
+  // than one request holds, the bottom ones go first
+  // (nextProjectKeysToRecord): a batch never lands below keys still unsaved.
+  // Each key is sent once per page: a refused save is not retried in a loop,
+  // and keys that do not fit a full list are not sent again and again. A
+  // background save fails quietly (the raw apply, no toast).
+  const recordedOrderKeysRef = useRef(new Set<string>());
+  const projectKeysToRecord = model.projectKeysToRecord;
+  const storedOrderLength = uiState.projectOrder?.length ?? 0;
+  useEffect(() => {
+    if (loading || !uiStateSynced || !sessionDetailsLoaded) return;
+    if (storedOrderLength >= MAX_PROJECT_ORDER_KEYS) return;
+    const recorded = recordedOrderKeysRef.current;
+    const keys = nextProjectKeysToRecord(projectKeysToRecord, recorded, MAX_SESSION_UI_IDS_PER_REQUEST);
+    if (keys.length === 0) return;
+    for (const key of keys) recorded.add(key);
+    void applyUiStateRequest({ action: "add-projects", keys });
+  }, [applyUiStateRequest, loading, projectKeysToRecord, sessionDetailsLoaded, storedOrderLength, uiStateSynced]);
+
+  // Every project in the groups' order, then those with sessions but no
+  // group (all of them archived, or pinned while the project is not): the
+  // project menus of the files tab and of the bar above a fresh composer,
+  // with the names the user gave them.
+  const projectNames = uiState.projectNames;
+  const projectChoiceList = useMemo(
+    () => mergeProjectChoices(model.projects, recentProjects, projectNames),
+    [model.projects, recentProjects, projectNames],
+  );
+
+  // What both pickers show for this cwd: the project, its worktrees where the
+  // files tab offers them (the top of a git checkout), every project. The
+  // tree is rebuilt on every refresh and running poll; the bar above a fresh
+  // composer hears of it only when something it shows changed.
+  const newSessionContext = useMemo<NewSessionContext | null>(() => {
+    if (!selectedCwd || !selectedProject) return null;
+    const listed = showWorktreeSwitcher && worktreeState !== null;
+    return {
+      cwd: selectedCwd,
+      project: withProjectAlias(selectedProject, projectNames),
+      worktrees: listed ? worktreeState.worktrees.map(({ path, branch, isMain }) => ({ path, branch, isMain })) : null,
+      currentWorktreePath: listed ? currentWorktreePath : null,
+      projects: projectChoiceList,
+    };
+  }, [selectedCwd, selectedProject, showWorktreeSwitcher, worktreeState, currentWorktreePath, projectChoiceList, projectNames]);
+  const newSessionContextRef = useRef(newSessionContext);
+  newSessionContextRef.current = newSessionContext;
+  const newSessionContextSignature = newSessionContextKey(newSessionContext);
+  useEffect(() => {
+    onNewSessionContextChange?.(newSessionContextRef.current);
+  }, [newSessionContextSignature, onNewSessionContextChange]);
+
+  // Picking a session in another group makes its project current. The group
+  // that was current keeps its look instead of folding up under the pointer
+  // (keepOutgoingGroupOpen), before the browser paints the change. For the
+  // page only: saved, every project visited would come back open after a reload.
+  const previousCurrentProjectKeyRef = useRef(currentProjectKey);
+  useLayoutEffect(() => {
+    const previous = previousCurrentProjectKeyRef.current;
+    previousCurrentProjectKeyRef.current = currentProjectKey;
+    if (previous === null || previous === currentProjectKey) return;
+    const outgoing = projectByKey.get(previous);
+    setKeptOpenGroups((kept) => keepOutgoingGroupOpen(kept, groupExpansion, outgoing));
+  }, [currentProjectKey, groupExpansion, projectByKey]);
+
+  // An explicit choice for the groups `keys` (null: every group): saved, and
+  // it replaces what the page kept open for them.
+  // A group it folds also drops its "show more" window: opened again, it
+  // shows its first rows only.
+  const saveGroupChoices = useCallback((next: Readonly<Record<string, boolean>>, keys: readonly string[] | null) => {
+    setGroupExpansion(next);
+    saveGroupExpansion(next);
+    setKeptOpenGroups((kept) => forgetKeptOpenGroups(kept, keys));
+    setMoreShown((shown) => forgetShownMoreOfFolded(shown, next, keys));
+  }, []);
+
+  /**
+   * The selected tab: focus has somewhere to go when the control it was on is
+   * gone. With the files below the sessions there are no tabs (their refs are
+   * null): the toolbar row's search button, always there and enabled.
+   */
+  const selectedTabButton = useCallback(
+    () => (sessionsPanelRef.current?.hidden ? filesTabRef : sessionsTabRef).current ?? searchButtonRef.current,
+    [],
+  );
+
+  // A family's row where the tree shows it now (pinned, in its group, or in
+  // the open archive view), else the selected tab.
+  const familyRowButton = useCallback((rootId: string): HTMLElement | null => {
+    const panel = sessionsPanelRef.current;
+    for (const context of ["pinned", "group", "archive"]) {
+      const key = CSS.escape(`session:${context}:${rootId}`);
+      const button = panel?.querySelector<HTMLElement>(`[data-row-key="${key}"] .session-tree-main`);
+      if (button && button.getClientRects().length > 0) return button;
+    }
+    return selectedTabButton();
+  }, [selectedTabButton]);
+
+  // A project's group header (its toggle), else the selected tab.
+  const groupHeaderButton = useCallback((projectKey: string): HTMLElement | null => {
+    const key = CSS.escape(`group:${projectKey}`);
+    const button = sessionsPanelRef.current?.querySelector<HTMLElement>(`[data-row-key="${key}"] .session-tree-group-toggle`);
+    return button && button.getClientRects().length > 0 ? button : selectedTabButton();
+  }, [selectedTabButton]);
+
+  // Pin and archive changes apply at once and are saved in the background; a
+  // refused save rolls back (useSessionUiState) and says why in a toast.
+  const applyUiState = useCallback(async (request: SessionUiStateRequest) => {
+    const ok = await applyUiStateRequest(request);
+    if (!ok) setUiWriteFailures((count) => count + 1);
+    return ok;
+  }, [applyUiStateRequest]);
+  useEffect(() => {
+    if (uiWriteFailures === shownUiWriteFailuresRef.current) return;
+    shownUiWriteFailuresRef.current = uiWriteFailures;
+    showToast(t("sidebar.uiStateFailed", { error: uiStateError ?? "" }));
+  }, [uiWriteFailures, uiStateError, showToast, t]);
+
+  // A drop, or Move up/down: the project goes next to another of its band.
+  // Its band's projects without a place are saved first, top to bottom, so
+  // it lands where the user saw it; past one request's worth (a full list, a
+  // move before the first save), the bottom ones, which land where they
+  // show. The moved group is then scrolled into view (a drop past a tall
+  // group, a keyboard move); kept mounted until then, it is still there for
+  // the menu to give focus back to.
+  const moveProject = useCallback((projectKey: string, anchorKey: string, position: ProjectMovePosition) => {
+    const project = projectByKey.get(projectKey);
+    const anchor = projectByKey.get(anchorKey);
+    // Pinned or unpinned in another window meanwhile: a move never crosses bands.
+    if (!project || !anchor || project === anchor || project.pinned !== anchor.pinned) return;
+    const add = model.unorderedKeysByBand[project.pinned ? "pinned" : "other"].slice(-MAX_SESSION_UI_IDS_PER_REQUEST);
+    void applyUiState({ action: "move-project", projectKey, anchorKey, position, add });
+    treeRevealIdRef.current += 1;
+    setTreeReveal({ id: treeRevealIdRef.current, at: Date.now(), rowKey: `group:${projectKey}` });
+  }, [applyUiState, model.unorderedKeysByBand, projectByKey]);
+
+  // With the files below the sessions there are no tabs: whatever would pick
+  // one (the archive view, the search's fallback) leaves the saved tab as it
+  // is, for the tabs layout and phones.
+  const switchTab = useCallback((tab: SidebarTab) => {
+    if (stacked) return;
+    setSidebarTab(tab);
+    saveSidebarTab(tab);
+  }, [stacked]);
+
+  // Every fold and unfold goes through here (the toggle, revealFiles, the
+  // file search, changes and upload keys, a file manager error), and moves;
+  // the restore after hydration sets the state directly and does not.
+  const setFilesSectionCollapsed = useCallback((collapsed: boolean) => {
+    if (collapsed !== filesCollapsedRef.current) startFilesFold(collapsed ? "out" : "in");
+    setFilesCollapsed(collapsed);
+    saveFilesCollapsed(collapsed);
+  }, [startFilesFold]);
+
+  // A hidden panel is display: none, and browsers do not reliably keep the
+  // scroll position of what it holds. Positions are noted as the user
+  // scrolls and put back when the panel (the tree under the archive view,
+  // the folded files section) shows again, in either layout; SessionTree then
+  // re-reads its window from them. A hidden one is skipped: it has no box.
+  const rememberScroll = useCallback((event: ReactUIEvent<HTMLDivElement>) => {
+    const target = event.target;
+    if (target instanceof Element) panelScrollTopsRef.current.set(target, target.scrollTop);
+  }, []);
+  useLayoutEffect(() => {
+    for (const panel of [sessionsPanelRef.current, filesPanelRef.current]) {
+      if (!panel || panel.hidden) continue;
+      for (const element of panel.querySelectorAll<HTMLElement>(".session-tree-scroll, .sidebar-files-scroll")) {
+        const saved = panelScrollTopsRef.current.get(element);
+        if (saved !== undefined && element.scrollTop !== saved) element.scrollTop = saved;
+      }
+    }
+  }, [sidebarTab, archiveView, stacked, filesCollapsed]);
+
+  // With `projectKey` (a group menu's "View archived") that project's header
+  // goes to the top of the archive, unfolded if it was; the other projects
+  // stay as they were.
+  const openArchiveView = useCallback((projectKey?: string) => {
+    setMenu(null);
+    setArchiveView(true);
+    // Search results would cover it.
+    setSessionSearchOpen(false);
+    switchTab("sessions");
+    if (projectKey === undefined) return;
+    if (archiveCollapsed.includes(projectKey)) {
+      const next = archiveCollapsed.filter((key) => key !== projectKey);
+      setArchiveCollapsed(next);
+      saveArchiveCollapsed(next);
+    }
+    treeRevealIdRef.current += 1;
+    setArchiveReveal({ id: treeRevealIdRef.current, at: Date.now(), rowKey: `archive:${projectKey}`, block: "start" });
+  }, [archiveCollapsed, setArchiveView, switchTab]);
+
+  // Opening the archive hides the tree that held focus (the footer link, a
+  // menu's opener, the toast's View) and Back removes the archive's own
+  // controls; while the view slides in or away, what it covers or what
+  // leaves is inert first (focusIfHidden counts both). Focus that went with
+  // them moves to the archive's Back button, then back to the footer link,
+  // or to the tab when that row is not shown.
+  const archiveBackRef = useRef<HTMLButtonElement>(null);
+  const previousArchiveViewRef = useRef(archiveView);
+  // Where closing the archive put focus: a fork opened from the archive
+  // reveals its row and may take focus from there.
+  const archiveCloseFocusRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (previousArchiveViewRef.current === archiveView) return;
+    previousArchiveViewRef.current = archiveView;
+    if (archiveView) {
+      focusIfHidden(archiveBackRef.current);
+      return;
+    }
+    const footer = sessionsPanelRef.current?.querySelector<HTMLElement>('[data-row-key="footer-archived"] button');
+    const target = footer && footer.getClientRects().length > 0 ? footer : selectedTabButton();
+    focusIfHidden(target);
+    if (target && document.activeElement === target) archiveCloseFocusRef.current = target;
+  }, [archiveView, selectedTabButton]);
+
+  // A layout switch (the setting from another window, the phone breakpoint)
+  // removes the controls only one layout has (the tabs; the separator, the
+  // files section's toggle and search) and may hide a panel. Focus that was
+  // on one of them goes to the selected tab or the search button, not to
+  // <body>; focus outside the sidebar (null here) is left alone. The window
+  // losing focus (no relatedTarget, !document.hasFocus()) keeps the note:
+  // the setting from another window arrives just then.
+  const sidebarFocusRef = useRef<Element | null>(null);
+  const previousStackedRef = useRef(stacked);
+  useLayoutEffect(() => {
+    if (previousStackedRef.current === stacked) return;
+    previousStackedRef.current = stacked;
+    const last = sidebarFocusRef.current;
+    if (last && (!last.isConnected || last.getClientRects().length === 0)) focusIfHidden(selectedTabButton());
+  }, [stacked, selectedTabButton]);
+
+  const handleTabKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight" && event.key !== "Home" && event.key !== "End") return;
+    event.preventDefault();
+    const next: SidebarTab = event.key === "Home" ? "sessions"
+      : event.key === "End" ? "files"
+      : sidebarTab === "sessions" ? "files" : "sessions";
+    switchTab(next);
+    (next === "sessions" ? sessionsTabRef : filesTabRef).current?.focus();
+  };
+
+  // A session family's pin and archive flags live on its root session.
+  const setFamilyPinned = useCallback((family: SessionFamily, pinned: boolean) => {
+    void applyUiState({ action: "set", ids: [family.root.id], pinned });
+  }, [applyUiState]);
+
+  const markFamilyRead = useCallback((family: SessionFamily, read: boolean) => {
+    setUnreadSessionIds((prev) => {
+      const next = new Set(prev);
+      if (read) {
+        for (const id of familyIds(family)) next.delete(id);
+      } else {
+        // Subagents never carry the marker (loadSessions prunes them).
+        next.add(family.root.id);
+      }
+      return next;
+    });
+  }, []);
+
+  // Unread markers coming back (Undo, a refused archive), except on the
+  // session that is open by now: it has been read.
+  const restoreUnread = useCallback((ids: readonly string[]) => {
+    if (ids.length === 0) return;
+    setUnreadSessionIds((prev) => {
+      const next = new Set(prev);
+      for (const id of ids) {
+        if (id !== selectedSessionIdRef.current) next.add(id);
+      }
+      return next.size === prev.size ? prev : next;
+    });
+  }, []);
+
+  const archiveFamilies = useCallback((families: readonly SessionFamily[]) => {
+    const archivable = families.filter((family) => !family.root.transient);
+    if (archivable.length === 0) return;
+    const snapshot = snapshotUiState(archivable.map((family) => family.root.id));
+    // Archived means dealt with: its unread markers go, and Undo brings them back.
+    const memberIds = archivable.flatMap((family) => familyIds(family));
+    const unreadBefore = memberIds.filter((id) => unreadSessionIds.has(id));
+    // A request carries at most MAX_SESSION_UI_IDS_PER_REQUEST families, so a
+    // big "Archive sessions older than 7 days" goes in parts; the write queue
+    // of useSessionUiState keeps them, and an Undo after them, in order.
+    for (const part of chunkForSessionUiRequests(archivable)) {
+      const ids = part.map((family) => family.root.id);
+      void applyUiState({ action: "set", ids, archived: true }).then((ok) => {
+        // A refused part is back in the tree (rolled back): so are its markers.
+        if (ok || unreadBefore.length === 0) return;
+        const partIds = new Set(part.flatMap((family) => familyIds(family)));
+        restoreUnread(unreadBefore.filter((id) => partIds.has(id)));
+      });
+    }
+    if (unreadBefore.length > 0) {
+      setUnreadSessionIds((prev) => {
+        const next = new Set(prev);
+        for (const id of memberIds) next.delete(id);
+        return next;
+      });
+    }
+    const message = archivable.length === 1
+      ? t("sidebar.archivedToast", { title: shortTitle(sessionRowTitle(archivable[0].root), TOAST_TITLE_MAX) })
+      : t("sidebar.archivedManyToast", { count: archivable.length });
+    showToast(message, [
+      {
+        id: "undo",
+        label: t("sidebar.undo"),
+        onClick: () => {
+          for (const entries of chunkForSessionUiRequests(snapshot)) {
+            void applyUiState({ action: "restore", entries });
+          }
+          restoreUnread(unreadBefore);
+          // The toast held focus; the first family back in the tree takes it.
+          focusAfterCommit(() => familyRowButton(archivable[0].root.id));
+        },
+      },
+      { id: "view", label: t("sidebar.viewArchive"), onClick: () => openArchiveView() },
+    ]);
+  }, [applyUiState, focusAfterCommit, familyRowButton, openArchiveView, restoreUnread, showToast, snapshotUiState, t, unreadSessionIds]);
+
+  // The row's archive button. A running family would come straight back, so
+  // it is not archived (the row offers no button for it either).
+  const archiveFamily = useCallback((family: SessionFamily) => {
+    if (familyIds(family).some((id) => runningSessionIds.has(id))) return;
+    archiveFamilies([family]);
+  }, [archiveFamilies, runningSessionIds]);
+
+  // Out of the archive: one row's Restore, or an archive menu's Restore all
+  // (in parts, as a bulk archive goes; Undo after them, in order).
+  const restoreFamilies = useCallback((families: readonly SessionFamily[]) => {
+    if (families.length === 0) return;
+    const ids = families.map((family) => family.root.id);
+    const snapshot = snapshotUiState(ids);
+    for (const part of chunkForSessionUiRequests(ids)) {
+      void applyUiState({ action: "set", ids: part, archived: false });
+    }
+    const message = families.length === 1
+      ? t("sidebar.restoredToast", { title: shortTitle(sessionRowTitle(families[0].root), TOAST_TITLE_MAX) })
+      : t("sidebar.restoredManyToast", { count: families.length });
+    showToast(message, [
+      {
+        id: "undo",
+        label: t("sidebar.undo"),
+        onClick: () => {
+          for (const entries of chunkForSessionUiRequests(snapshot)) {
+            void applyUiState({ action: "restore", entries });
+          }
+          // Back in the archive view if it is open; else the tab takes focus.
+          focusAfterCommit(() => familyRowButton(families[0].root.id));
+        },
+      },
+    ]);
+  }, [applyUiState, familyRowButton, focusAfterCommit, showToast, snapshotUiState, t]);
+
+  const restoreFamily = useCallback((family: SessionFamily) => restoreFamilies([family]), [restoreFamilies]);
+
+  const startRename = useCallback((family: SessionFamily) => {
+    if (family.root.transient) return;
+    setConfirmDeleteRootId(null);
+    setRenamingRootId(family.root.id);
+  }, []);
+
+  const commitRename = useCallback(async (family: SessionFamily, renameValue: string) => {
+    const session = family.root;
+    const title = sessionRowTitle(session);
+    const name = renameValue.trim();
+    setRenamingRootId((current) => (current === session.id ? null : current));
+    // No-op when unchanged: the fallback title (first message / id) isn't a
+    // real stored name, so don't persist it as one. (The rename input seeds
+    // from the same collapsed first message, so an untouched rename of a
+    // skill-invoked session stays a no-op instead of persisting raw XML.)
+    if (renameValue === title || name === (session.name ?? "")) return;
+    try {
+      await fetch(`/api/sessions/${encodeURIComponent(session.id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      void loadSessions();
+    } catch {
+      // ignore
+    }
+  }, [loadSessions]);
+
+  // A project's display name is pi-web's own (the UI state file): renaming
+  // it never selects the project, nor moves, pins or folds its group. The
+  // header's field goes as the name is saved; its toggle takes the focus.
+  const startProjectRename = useCallback((project: SidebarProject) => {
+    setRenamingProjectKey(project.key);
+  }, []);
+
+  const endProjectRename = useCallback((projectKey: string) => {
+    setRenamingProjectKey((current) => (current === projectKey ? null : current));
+    focusAfterCommit(() => groupHeaderButton(projectKey));
+  }, [focusAfterCommit, groupHeaderButton]);
+
+  const commitProjectRename = useCallback((project: SidebarProject, value: string) => {
+    endProjectRename(project.key);
+    const request = projectRenameRequest(project, value);
+    if (request) void applyUiState(request);
+  }, [applyUiState, endProjectRename]);
+
+  const performDelete = useCallback(async (family: SessionFamily) => {
+    const session = family.root;
+    if (session.transient) return;
+    setConfirmDeleteRootId((current) => (current === session.id ? null : current));
+    try {
+      // The server deletes the family's subagent sessions with it.
+      await fetch(`/api/sessions/${encodeURIComponent(session.id)}`, { method: "DELETE" });
+      onSessionDeleted?.(session.id);
+      void loadSessions();
+    } catch {
+      // The row stays; the next refresh shows what happened.
+    }
+  }, [loadSessions, onSessionDeleted]);
+
+  // Only Shift skips the confirmation (Shift+click, Shift+Enter or Shift+D in the menu).
+  const requestDelete = useCallback((family: SessionFamily, shiftKey: boolean) => {
+    if (shiftKey) {
+      void performDelete(family);
+    } else {
+      setRenamingRootId(null);
+      setConfirmDeleteRootId(family.root.id);
+    }
+  }, [performDelete]);
+
+  // Fork (the row menu's F): the server copies the family's current branch
+  // into a new session beside it (POST /api/sessions/[id]/fork) and leaves
+  // the source as it is, running or not. The copy opens where its row is: the
+  // archive view closes (the copy has no pin or archive flag), a group the
+  // user collapsed opens, and the main tree scrolls to the row, which takes
+  // focus when it is still on the source's row (or fell to the page). Called
+  // after a request and from a toast, so always through openForkedRef: the
+  // newest state and AppShell's newest selection handler, never a click-time
+  // closure. `fromRowKey` is the row whose Fork this answers: focus may move
+  // from it, and a phone's drawer stays open, since the copy looks just like
+  // its source and only the sidebar (its row, the toast) tells them apart.
+  // null is the toast's Open, which opens the copy as a row click does.
+  const openForked = (forked: SessionInfo, fromRowKey: string | null) => {
+    archiveCloseFocusRef.current = null;
+    if (archiveView) {
+      // The main tree's saved position would be put back over the reveal.
+      const main = sessionsPanelRef.current?.querySelector(".sidebar-sessions-view .session-tree-scroll");
+      if (main) panelScrollTopsRef.current.delete(main);
+      setArchiveView(false);
+    }
+    const groupKey = workspaceKeyOf(forked);
+    if (Object.hasOwn(shownGroupExpansion, groupKey) && shownGroupExpansion[groupKey] === false) {
+      const next = { ...groupExpansion };
+      // Re-inserted, so the choice counts as the newest one kept.
+      delete next[groupKey];
+      next[groupKey] = true;
+      saveGroupChoices(next, [groupKey]);
+    }
+    handleSelectSessionFromList(forked, undefined, undefined, { keepSidebarOpen: fromRowKey !== null });
+    // The route invalidated the list: the next load has the copy.
+    void loadSessions();
+    const fromRow = fromRowKey ? `[data-row-key="${CSS.escape(fromRowKey)}"]` : null;
+    treeRevealIdRef.current += 1;
+    setTreeReveal({
+      id: treeRevealIdRef.current,
+      at: Date.now(),
+      rowKey: `session:group:${forked.id}`,
+      takeFocusFrom: (active) => (fromRow !== null && active.closest(fromRow) !== null) || active === archiveCloseFocusRef.current,
+    });
+  };
+  const openForkedRef = useRef(openForked);
+  openForkedRef.current = openForked;
+
+  // One fork per session at a time: F again on a session whose fork is under
+  // way does nothing; another session's Fork goes ahead.
+  const forkingIdsRef = useRef(new Set<string>());
+  const forkFamily = useCallback(async (row: SessionRow) => {
+    const source = row.family.root;
+    if (source.transient || forkingIdsRef.current.has(source.id)) return;
+    forkingIdsRef.current.add(source.id);
+    const selectedAtClick = selectedSessionIdRef.current;
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(source.id)}/fork`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      const data = await res.json().catch(() => ({})) as { session?: SessionInfo; code?: string; error?: string };
+      if (!res.ok || !data.session) {
+        const { key, params } = forkFailureMessage(data.code, data.error ?? `HTTP ${res.status}`);
+        showToast(t(key, params));
+        // Deleted elsewhere (the pi CLI, another window): its row goes.
+        if (data.code === "not_found") void loadSessions();
+        return;
+      }
+      const forked = data.session;
+      // The copy's name ends in the suffix that tells it from its source: the
+      // toast's ellipsis cuts the name before it, never the suffix. A copy
+      // left unnamed (its source had no title) is cut as other toasts are.
+      const title = sessionRowTitle(forked);
+      const { head: message, tail } = splitBeforeForkSuffix(t("sidebar.forkedToast", { title }), title)
+        ?? { head: t("sidebar.forkedToast", { title: shortTitle(title, TOAST_TITLE_MAX) }), tail: undefined };
+      if (selectedSessionIdRef.current !== selectedAtClick) {
+        // Another session was opened meanwhile: the user stays there. The
+        // copy waits in its group, unread (so it shows beyond the group's
+        // limit), and the toast offers to open it.
+        setAllSessions((current) => (current.some((session) => session.id === forked.id) ? current : [forked, ...current]));
+        setUnreadSessionIds((prev) => new Set(prev).add(forked.id));
+        void loadSessions();
+        showToast(message, [{ id: "open", label: t("sidebar.open"), onClick: () => openForkedRef.current(forked, null) }], tail);
+        return;
+      }
+      openForkedRef.current(forked, row.key);
+      showToast(message, [], tail);
+    } catch (error) {
+      showToast(t("sidebar.forkFailed", { error: error instanceof Error ? error.message : String(error) }));
+    } finally {
+      forkingIdsRef.current.delete(source.id);
+    }
+  }, [loadSessions, showToast, t]);
+
+  // 生成标题（行菜单的 G）：目标是菜单所在那一行的会话，按 id 发请求，
+  // 不读「当前选中的会话」，所以生成期间切到别的会话也不会改写目标。
+  // 每个会话同时只发一个请求：ref 供同步判重，state 让菜单项显示「生成中」；别的会话的请求照常进行。
+  const namingIdsRef = useRef(new Set<string>());
+  const [namingIds, setNamingIds] = useState<ReadonlySet<string>>(() => new Set());
+  const generateTitle = useCallback(async (row: SessionRow) => {
+    const target = row.family.root;
+    if (target.transient || namingIdsRef.current.has(target.id)) return;
+    namingIdsRef.current.add(target.id);
+    setNamingIds(new Set(namingIdsRef.current));
+    showToast(t("title.generating"));
+    const outcome = await requestSessionTitle(target.id, fetch);
+    namingIdsRef.current.delete(target.id);
+    setNamingIds(new Set(namingIdsRef.current));
+    if ("error" in outcome) {
+      showToast(t("title.failedWithError", { error: outcome.error }));
+      return;
+    }
+    // 先按 id 把新标题写进目录，行立刻变；再重新读一次列表对齐服务端。
+    // 打开着的会话经 onSessionsChange 合并到页面，同样按 id，不会写到别的会话上。
+    setAllSessions((current) => current.map((session) => (session.id === target.id ? { ...session, name: outcome.title } : session)));
+    void loadSessions();
+    showToast(t("title.updated"));
+  }, [loadSessions, showToast, t]);
+
+  // Open in new tab (the row menu's T): the row's session in a browser tab of
+  // its own, by the same link its title carries. This tab's selection, cwd and
+  // file tabs stay as they are, and nothing is asked of the server here: the
+  // new tab loads the session as a reload would. Synchronous inside the menu's
+  // click or key press, so the browser counts it as the user's and does not
+  // block it as a popup. Its return value says nothing: with noopener the
+  // browser returns null whether the tab opened or not.
+  const openFamilyInNewTab = useCallback((family: SessionFamily) => {
+    if (family.root.transient) return;
+    window.open(sessionDeepLink(family.root.id), "_blank", "noopener,noreferrer");
+  }, []);
+
+  const runSessionAction = (id: SessionMenuActionId, row: SessionRow, shiftKey: boolean) => {
+    const { family } = row;
+    switch (id) {
+      case "open-new-tab": openFamilyInNewTab(family); break;
+      case "pin": setFamilyPinned(family, true); break;
+      case "unpin": setFamilyPinned(family, false); break;
+      case "rename": startRename(family); break;
+      case "generate-title": void generateTitle(row); break;
+      case "fork": void forkFamily(row); break;
+      case "share": setSharingSession(family.root); break;
+      case "export": setExportingSession(family.root); break;
+      case "mark-read": markFamilyRead(family, true); break;
+      case "mark-unread": markFamilyRead(family, false); break;
+      case "archive": archiveFamily(family); break;
+      case "unarchive": restoreFamily(family); break;
+      case "delete": requestDelete(family, shiftKey); break;
+    }
+  };
+
+  const openRowMenu = useCallback((row: SessionRow, anchor: SidebarMenuAnchor, opener: HTMLElement | null) => {
+    if (row.status.transient) return;
+    setMenu({ kind: "row", row, anchor, opener });
+  }, []);
+
+  // Right-click: an extension listening for the downstream event (a pi-web
+  // integration) claims the row first; only an unclaimed event opens the
+  // built-in menu. A transient row has nothing to offer, so the browser's own
+  // menu stays.
+  const handleContextMenu = useCallback((row: SessionRow, event: ReactMouseEvent) => {
+    const session = row.family.root;
+    if (session.id === renamingRootId || session.id === confirmDeleteRootId) return;
+    if (dispatchSessionRowContextMenu({
+      id: session.id,
+      path: session.path,
+      cwd: session.cwd,
+      name: session.name,
+      clientX: event.clientX,
+      clientY: event.clientY,
+      refresh: () => { void loadSessions(); },
+    })) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    if (session.transient) return;
+    event.preventDefault();
+    const rowElement = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+    // The keyboard's context-menu key reports no pointer position.
+    const anchor: SidebarMenuAnchor = event.clientX === 0 && event.clientY === 0 && rowElement
+      ? buttonAnchor(rowElement, "start")
+      : { kind: "point", x: event.clientX, y: event.clientY };
+    // Focus goes back into the row it came from (the keyboard case). An
+    // element elsewhere (the composer) is not made the menu's opener, whose
+    // next click the menu would take as "close"; it gets focus back after.
+    const active = document.activeElement;
+    const inRow = active instanceof HTMLElement && rowElement !== null && rowElement.contains(active);
+    contextMenuFocusRef.current = !inRow && active instanceof HTMLElement && active !== document.body ? active : null;
+    openRowMenu(row, anchor, inRow ? active : null);
+  }, [confirmDeleteRootId, loadSessions, openRowMenu, renamingRootId]);
+
+  const treeSelectionInput = useMemo(() => ({
+    sessions: allSessions,
+    uiState,
+    runningIds: runningSessionIds,
+    awaitingIds: awaitingInputSessionIds,
+    unreadIds: unreadSessionIds,
+    selectedSessionId,
+  }), [allSessions, uiState, runningSessionIds, awaitingInputSessionIds, unreadSessionIds, selectedSessionId]);
+
+  const handleGroupMenu = useCallback((project: SidebarProject, opener: HTMLElement) => {
+    const olderCount = familiesToArchive(treeSelectionInput, project.key, ARCHIVE_OLDER_THAN_MS, Date.now()).length;
+    setMenu({ kind: "group", project, olderCount, anchor: buttonAnchor(opener, "end"), opener });
+  }, [treeSelectionInput]);
+
+  const archiveOlderSessions = useCallback((project: SidebarProject) => {
+    const ids = familiesToArchive(treeSelectionInput, project.key, ARCHIVE_OLDER_THAN_MS, Date.now());
+    archiveFamilies(ids.flatMap((id) => {
+      const family = familyByRootId.get(id);
+      return family ? [family] : [];
+    }));
+  }, [archiveFamilies, familyByRootId, treeSelectionInput]);
+
+  // A project's "Delete all sessions…" (and the archive's deletes): the menu
+  // turns into its question, focus on Cancel (the sheet's on a phone), so
+  // Enter deletes nothing; Cancel goes back to the list. Delete closes the
+  // menu and sends the families the question counts at that moment, running
+  // ones kept (the server also keeps one that started since); toasts say how
+  // it went. One run per project (or archive scope) at a time.
+  const askProjectDelete = useCallback((projectKey: string, askDelete: boolean) => {
+    setMenu((current) => (current?.kind === "group" && current.project.key === projectKey ? { ...current, askDelete } : current));
+  }, []);
+  // "Delete workspace…" turns the group's menu into its own question, the same way.
+  const askProjectRemove = useCallback((projectKey: string, askRemove: boolean) => {
+    setMenu((current) => (current?.kind === "group" && current.project.key === projectKey ? { ...current, askRemove } : current));
+  }, []);
+
+  const deletingRunsRef = useRef(new Set<string>());
+  const deleteFamilyIds = useCallback(async (runKey: string, ids: readonly string[], focusTarget: () => HTMLElement | null) => {
+    setMenu(null);
+    if (ids.length === 0 || deletingRunsRef.current.has(runKey)) return;
+    deletingRunsRef.current.add(runKey);
+    showToast(t("sidebar.deletingSessions"));
+    try {
+      const outcome = await deleteProjectSessions(ids, fetch);
+      for (const id of outcome.deleted) onSessionDeleted?.(id);
+      // A group goes with its last session (in the tree, unless it is
+      // current or pinned): focus that fell to the page with it moves on.
+      void loadSessions().then(() => focusAfterCommit(focusTarget));
+      if (outcome.error !== null) {
+        showToast(t("sidebar.deleteFailed", { error: outcome.error }));
+        return;
+      }
+      const count = outcome.deletedRoots.length;
+      const parts = [count === 1 ? t("sidebar.deletedOneToast") : t("sidebar.deletedManyToast", { count })];
+      if (outcome.running.length > 0) parts.push(t("sidebar.keptRunningToast", { count: outcome.running.length }));
+      showToast(parts.join(" · "));
+    } finally {
+      deletingRunsRef.current.delete(runKey);
+    }
+  }, [focusAfterCommit, loadSessions, onSessionDeleted, showToast, t]);
+
+  const deleteAllProjectSessions = useCallback((project: SidebarProject) => {
+    const { ids } = familiesToDelete(treeSelectionInput, project.key);
+    void deleteFamilyIds(`project:${project.key}`, ids, () => groupHeaderButton(project.key));
+  }, [deleteFamilyIds, groupHeaderButton, treeSelectionInput]);
+
+  // The archive's own menus: a project header's ⋯ (Restore all, Delete
+  // all…) and the bar's (fold every project, Restore all, the two deletes).
+  // Their counts are live; Restore and Delete take what is archived when
+  // chosen. An archived family never runs, so nothing is kept back.
+  // A project's archive header (its toggle), else the archive's Back, else the selected tab.
+  const archiveHeaderButton = useCallback((projectKey: string | null): HTMLElement | null => {
+    const key = projectKey === null ? null : CSS.escape(`archive:${projectKey}`);
+    const button = key === null ? null : sessionsPanelRef.current?.querySelector<HTMLElement>(`[data-row-key="${key}"] .session-tree-group-toggle`);
+    if (button && button.getClientRects().length > 0) return button;
+    const back = archiveBackRef.current;
+    return back && back.getClientRects().length > 0 ? back : selectedTabButton();
+  }, [selectedTabButton]);
+
+  const familiesOf = useCallback((ids: readonly string[]) => ids.flatMap((id) => {
+    const family = familyByRootId.get(id);
+    return family ? [family] : [];
+  }), [familyByRootId]);
+
+  // A group's "Delete workspace…". A group is no stored entity: the tree
+  // shows it while it has live sessions, is the current project or is
+  // pinned. So deleting one makes those three untrue: its sessions go to the
+  // archive or are deleted, the project is unpinned and loses its display
+  // name, and when it is the current project the next one takes over (the
+  // shell then closes the session open in it). Only pi-web's own records and
+  // session files change; the project's folder and its files are never
+  // touched. A running session is kept either way and stays in the sidebar
+  // until the run ends.
+  const removeWorkspace = useCallback((project: SidebarProject, deleteSessions: boolean) => {
+    setMenu(null);
+    if (project.pinned) void applyUiState({ action: "pin-project", projectKey: project.key, root: project.root, pinned: false });
+    if (project.customName !== null) void applyUiState({ action: "rename-project", projectKey: project.key, name: null });
+    if (project.current) {
+      const index = model.projects.findIndex((other) => other.key === project.key);
+      const next = model.projects[index + 1] ?? model.projects[index - 1];
+      // No other group: no project is selected, and the first-load choice
+      // (getRecentProjects counts archived sessions too) must not pick this one again.
+      projectClearedRef.current = next === undefined;
+      setSelectedCwd(next?.root ?? null);
+    }
+    const { ids: deletable, running } = familiesToDelete(treeSelectionInput, project.key);
+    if (deleteSessions && deletable.length > 0) {
+      // Its own toasts say what went and what was kept; focus follows the reload.
+      void deleteFamilyIds(`project:${project.key}`, deletable, () => groupHeaderButton(project.key));
+      return;
+    }
+    const archivable = deleteSessions ? [] : familiesOf(projectFamiliesToArchive(treeSelectionInput, project.key));
+    if (archivable.length > 0) {
+      archiveFamilies(archivable);
+    } else {
+      const parts = [t("sidebar.workspaceDeletedToast", { name: shortTitle(project.name, TOAST_TITLE_MAX) })];
+      if (running > 0) parts.push(t("sidebar.keptRunningToast", { count: running }));
+      showToast(parts.join(" · "));
+    }
+    // The group is gone with its opener: focus that fell to the page moves on.
+    focusAfterCommit(() => groupHeaderButton(project.key));
+  }, [applyUiState, archiveFamilies, deleteFamilyIds, familiesOf, focusAfterCommit, groupHeaderButton, model.projects, showToast, t, treeSelectionInput]);
+
+  const handleArchiveGroupMenu = useCallback((project: SidebarProject, opener: HTMLElement) => {
+    setMenu({ kind: "archive-group", project, anchor: buttonAnchor(opener, "end"), opener });
+  }, []);
+
+  const openArchiveMenu = useCallback((opener: HTMLElement) => {
+    setMenu((current) => (current?.kind === "archive" ? null : { kind: "archive", anchor: buttonAnchor(opener, "end"), opener }));
+  }, []);
+
+  const askArchiveDelete = useCallback((askDelete: ArchiveDeleteScope | undefined) => {
+    setMenu((current) => {
+      if (current?.kind === "archive") return { ...current, askDelete };
+      if (current?.kind === "archive-group") return { ...current, askDelete: askDelete !== undefined };
+      return current;
+    });
+  }, []);
+
+  const archiveDeleteIds = useCallback((scope: ArchiveDeleteScope | { projectKey: string }) => archivedFamilyIds(
+    treeSelectionInput,
+    scope === "all" ? {} : scope === "old" ? { archivedBefore: Date.now() - ARCHIVED_DELETE_AFTER_MS } : scope,
+  ), [treeSelectionInput]);
+
+  const deleteArchived = useCallback((scope: ArchiveDeleteScope | { projectKey: string }) => {
+    const ids = archiveDeleteIds(scope);
+    const runKey = typeof scope === "string" ? `archive:${scope}` : `archive-project:${scope.projectKey}`;
+    void deleteFamilyIds(runKey, ids, () => (typeof scope === "string" ? archiveHeaderButton(null) : archiveHeaderButton(scope.projectKey)));
+  }, [archiveDeleteIds, archiveHeaderButton, deleteFamilyIds]);
+
+  // Folding the archive's projects: one header, or (Alt+click, the bar's
+  // menu) every one of them. Saved per browser, the newest choice last.
+  const saveArchiveFolds = useCallback((next: readonly string[]) => {
+    setArchiveCollapsed(next);
+    saveArchiveCollapsed(next);
+  }, []);
+  const setAllArchiveGroupsExpanded = useCallback((expanded: boolean) => {
+    const keys = archiveGroups.map((row) => row.project.key);
+    const others = archiveCollapsed.filter((key) => !keys.includes(key));
+    saveArchiveFolds(expanded ? others : [...others, ...keys]);
+  }, [archiveCollapsed, archiveGroups, saveArchiveFolds]);
+  const handleToggleArchiveGroup = useCallback((projectKey: string, all: boolean) => {
+    const expanded = archiveCollapsed.includes(projectKey);
+    if (all) {
+      setAllArchiveGroupsExpanded(expanded);
+      return;
+    }
+    const others = archiveCollapsed.filter((key) => key !== projectKey);
+    saveArchiveFolds(expanded ? others : [...others, projectKey]);
+  }, [archiveCollapsed, saveArchiveFolds, setAllArchiveGroupsExpanded]);
+
+  // A group's "+": a new session at once. The current project starts in the
+  // sidebar's worktree, another one in its root (the main checkout); the bar
+  // above the fresh composer picks another worktree. The group's own key and
+  // root go along, so a worktree is never taken for another project, and a
+  // pinned project without sessions keeps its server identity.
+  const handleGroupNew = useCallback((project: SidebarProject) => {
+    setMenu(null);
+    startNewSessionIn(newSessionTargetForProject(project, selectedCwd));
+  }, [selectedCwd, startNewSessionIn]);
+
+  const closeMenu = useCallback(() => setMenu(null), []);
+
+  // After a right-click menu, focus returns to where it was unless the chosen
+  // action put it somewhere (a rename field, a delete confirmation).
+  useEffect(() => {
+    if (menu !== null) return;
+    const previous = contextMenuFocusRef.current;
+    contextMenuFocusRef.current = null;
+    if (!previous?.isConnected) return;
+    const active = document.activeElement;
+    if (!active || active === document.body) previous.focus({ preventScroll: true });
+  }, [menu]);
+
+  // A row whose menu is open can leave the tree (archived or deleted in
+  // another window): its menu goes with it.
+  const visibleRows = archiveView ? archiveRows : model.rows;
+  useEffect(() => {
+    if (menu?.kind === "row" && !visibleRows.some((row) => row.key === menu.row.key)) setMenu(null);
+    if (menu?.kind === "archive-group" && !visibleRows.some((row) => row.key === `archive:${menu.project.key}`)) setMenu(null);
+  }, [menu, visibleRows]);
+
+  // Rows are rebuilt on every refresh; the menu acts on the current one.
+  const menuRow = menu?.kind === "row"
+    ? (visibleRows.find((row): row is SessionRow => row.kind === "session" && row.key === menu.row.key) ?? menu.row)
+    : null;
+
+  const handleSelectFamily = useCallback((family: SessionFamily) => {
+    handleSelectSessionFromList(family.root);
+  }, [handleSelectSessionFromList]);
+
+  // Every group at once: a group's menu, or Alt+click on its header.
+  // Re-inserted, so the choices count as the newest ones kept.
+  const setAllGroupsExpanded = useCallback((expanded: (project: SidebarProject) => boolean) => {
+    const next = { ...groupExpansion };
+    for (const project of model.projects) {
+      delete next[project.key];
+      next[project.key] = expanded(project);
+    }
+    saveGroupChoices(next, null);
+  }, [groupExpansion, model.projects, saveGroupChoices]);
+
+  // Expanding or collapsing a group only changes the view: it never moves the
+  // cwd (picking a project does that, in the files tab). With Alt, every
+  // group follows the one clicked, as in a Finder outline.
+  const handleToggleGroup = useCallback((projectKey: string, all: boolean) => {
+    const project = projectByKey.get(projectKey);
+    if (!project) return;
+    const expanded = !isGroupExpanded(project, shownGroupExpansion);
+    if (all) {
+      setAllGroupsExpanded(() => expanded);
+      return;
+    }
+    const next = { ...groupExpansion };
+    // Re-inserted, so the choice counts as the newest one kept.
+    delete next[projectKey];
+    next[projectKey] = expanded;
+    saveGroupChoices(next, [projectKey]);
+  }, [groupExpansion, projectByKey, saveGroupChoices, setAllGroupsExpanded, shownGroupExpansion]);
+
+  // The window a click opens is the one its row offers now (`nextShown`):
+  // decided at the click, by position, so a row that turns selected, unread
+  // or running later never shifts it.
+  const handleShowMore = useCallback((key: string) => {
+    const row = model.rows.find((item) => (item.kind === "group-more" && item.projectKey === key)
+      || (item.kind === "pinned-more" && key === PINNED_MORE_KEY));
+    if (row?.kind !== "group-more" && row?.kind !== "pinned-more") return;
+    setMoreShown((prev) => showMoreFamilies(prev, key, row.nextShown));
+  }, [model.rows]);
+  const handleShowLess = useCallback((key: string) => {
+    setMoreShown((prev) => showLessFamilies(prev, key));
+  }, []);
+
+  const handleTogglePinned = () => {
+    const next = !pinnedCollapsed;
+    setPinnedCollapsed(next);
+    savePinnedCollapsed(next);
+    // Folded, the pinned section drops its "show more" window as a group does.
+    if (next) setMoreShown((shown) => showLessFamilies(shown, PINNED_MORE_KEY));
+  };
+
+  // Everything that goes to the files goes through here: the files tab, or
+  // the files section below the sessions, opened (and saved so) if folded.
+  // The focus follows once they show.
+  const revealFiles = useCallback((focusTarget: "project-button" | "project-list" | "file-search") => {
+    filesFocusRef.current = focusTarget;
+    setFilesFocusRequest((count) => count + 1);
+    if (stacked) setFilesSectionCollapsed(false);
+    else switchTab("files");
+  }, [setFilesSectionCollapsed, stacked, switchTab]);
+
+  // "Open in Files" of another project is a deliberate project switch, the
+  // same as choosing it in the files' project list.
+  const openProjectInFiles = (project: SidebarProject) => {
+    if (!project.current) setSelectedCwd(project.root);
+    revealFiles("project-button");
+  };
+
+  const openProjectInNewTab = (project: SidebarProject) => {
+    const { cwd } = newSessionTargetForProject(project, selectedCwd);
+    // Navigation only, synchronous in the menu action so the browser permits it.
+    window.open(newSessionDeepLink(cwd), "_blank", "noopener,noreferrer");
+  };
+
+  const handleOpenOtherProject = () => {
+    revealFiles("project-list");
+  };
+  // Once the files show, the project button takes the focus, or its menu
+  // opens below it (the menu takes the focus: its filter or first project),
+  // or the file search field does. Below the sessions they may show already:
+  // the request counter runs it all the same. An unfolding section is not
+  // shown yet: its button is still below the sidebar's edge, where the
+  // project menu would be placed.
+  const filesShown = stacked ? filesFold.open : sidebarTab === "files";
+  useEffect(() => {
+    const target = filesFocusRef.current;
+    if (!target || !filesShown) return;
+    filesFocusRef.current = null;
+    if (target === "project-list") filesPickerRef.current?.openMenu("project");
+    else if (target === "file-search") document.getElementById("file-search-input")?.focus({ preventScroll: true });
+    else filesPickerRef.current?.button("project")?.focus({ preventScroll: true });
+  }, [filesShown, filesFocusRequest]);
+
+  const sessionMenuItems = (row: SessionRow): SidebarMenuItem[] => sessionMenuEntries(row.context, row.status).map((entry, index) => {
+    if (entry.kind === "separator") return { type: "separator", id: `separator-${index}` };
+    const label = t(SESSION_ACTION_LABEL_KEYS[entry.id]);
+    // 生成标题：这一行的会话正在生成时显示「生成中」并禁用（防重复点击）；还没有消息的会话没东西可命名，
+    // 沿用旧按钮的提示。两种情况都只看这一行自己的会话，与当前选中的会话无关。
+    // detailsPending 的摘要行 messageCount 只是占位的 0，不能据此判断「没有消息」。
+    const naming = entry.id === "generate-title" && namingIds.has(row.family.root.id);
+    const noMessages = entry.id === "generate-title" && !row.family.root.detailsPending && row.family.root.messageCount === 0;
+    return {
+      type: "item",
+      id: entry.id,
+      label: naming ? t("title.generating") : entry.id === "delete" ? `${label}…` : label,
+      icon: naming ? <SpinnerIcon /> : sessionActionIcon(entry.id),
+      shortcut: entry.shortcut,
+      danger: entry.id === "delete",
+      disabled: entry.disabledReason !== undefined || naming || noMessages,
+      disabledReason: entry.disabledReason === "running" ? t("sidebar.cannotArchiveRunning") : undefined,
+      title: noMessages ? t("title.noMessages") : undefined,
+      onSelect: ({ shiftKey }) => runSessionAction(entry.id, row, shiftKey),
+    };
+  });
+
+  const groupMenuItems = (project: SidebarProject, olderCount: number): SidebarMenuItem[] => {
+    const archivedCount = archiveIndex.countByProject.get(project.key) ?? 0;
+    const deletable = familiesToDelete(treeSelectionInput, project.key);
+    // Within the project's band; disabled at its edges.
+    const up = adjacentProjectMove(model.projects, project.key, "up");
+    const down = adjacentProjectMove(model.projects, project.key, "down");
+    const nameItems = projectNameMenuEntries(project).map((id): SidebarMenuItem => (id === "rename-project" ? {
+      type: "item",
+      id,
+      label: t("sidebar.renameProject"),
+      icon: <PencilIcon />,
+      onSelect: () => startProjectRename(project),
+    } : {
+      type: "item",
+      id,
+      label: t("sidebar.resetProjectName"),
+      icon: <RestoreIcon />,
+      onSelect: () => { void applyUiState({ action: "rename-project", projectKey: project.key, name: null }); },
+    }));
+    // Four groups, by what they act on: the project itself, its place in the
+    // list, its sessions (Delete all last, in red), and the workspace's
+    // removal alone at the bottom, in red too.
+    return [
+      {
+        type: "item",
+        id: "pin-project",
+        label: t(project.pinned ? "sidebar.unpinProject" : "sidebar.pinProject"),
+        icon: project.pinned ? <PinOffIcon /> : <PinIcon />,
+        onSelect: () => { void applyUiState({ action: "pin-project", projectKey: project.key, root: project.root, pinned: !project.pinned }); },
+      },
+      ...nameItems,
+      {
+        type: "item",
+        id: "open-in-files",
+        label: t("sidebar.openInFilesTab"),
+        icon: <FolderIcon />,
+        onSelect: () => openProjectInFiles(project),
+      },
+      {
+        type: "item",
+        id: "open-new-tab",
+        label: t("sidebar.openInNewTab"),
+        icon: <OpenInNewTabIcon />,
+        shortcut: "T",
+        onSelect: () => openProjectInNewTab(project),
+      },
+      { type: "separator", id: "separator-layout" },
+      {
+        type: "item",
+        id: "move-up",
+        label: t("sidebar.moveProjectUp"),
+        icon: <ChevronIcon className="sidebar-icon-up" />,
+        disabled: up === null,
+        onSelect: () => { if (up) moveProject(project.key, up.anchorKey, up.position); },
+      },
+      {
+        type: "item",
+        id: "move-down",
+        label: t("sidebar.moveProjectDown"),
+        icon: <ChevronIcon className="sidebar-icon-down" />,
+        disabled: down === null,
+        onSelect: () => { if (down) moveProject(project.key, down.anchorKey, down.position); },
+      },
+      {
+        // This project open, every other one closed.
+        type: "item",
+        id: "collapse-others",
+        label: t("sidebar.collapseOtherGroups"),
+        icon: <ChevronIcon />,
+        disabled: model.projects.every((other) => isGroupExpanded(other, shownGroupExpansion) === (other.key === project.key)),
+        onSelect: () => setAllGroupsExpanded((other) => other.key === project.key),
+      },
+      {
+        type: "item",
+        id: "expand-all",
+        label: t("sidebar.expandAllGroups"),
+        icon: <ChevronIcon className="sidebar-icon-down" />,
+        disabled: model.projects.every((other) => isGroupExpanded(other, shownGroupExpansion)),
+        onSelect: () => setAllGroupsExpanded(() => true),
+      },
+      { type: "separator", id: "separator-sessions" },
+      {
+        type: "item",
+        id: "import-session",
+        label: t("sidebar.importSession"),
+        icon: <UploadIcon />,
+        onSelect: () => setImportDialogCwd(project.root),
+      },
+      {
+        type: "item",
+        id: "archive-older",
+        label: t("sidebar.archiveOlderThanWeek", { count: olderCount }),
+        icon: <ArchiveIcon />,
+        disabled: olderCount === 0,
+        onSelect: () => archiveOlderSessions(project),
+      },
+      {
+        type: "item",
+        id: "view-archived",
+        label: t("sidebar.viewArchived", { count: archivedCount }),
+        icon: <ArchiveIcon />,
+        disabled: archivedCount === 0,
+        onSelect: () => openArchiveView(project.key),
+      },
+      {
+        type: "item",
+        id: "delete-all",
+        label: t("sidebar.deleteProjectSessions", { count: deletable.ids.length }),
+        icon: <TrashIcon />,
+        danger: true,
+        disabled: deletable.ids.length === 0,
+        onSelect: ({ keepOpen }) => {
+          keepOpen();
+          askProjectDelete(project.key, true);
+        },
+      },
+      { type: "separator", id: "separator-workspace" },
+      {
+        // Never disabled: an empty current or pinned project can only be
+        // removed from here. The question says what happens to its sessions.
+        type: "item",
+        id: "delete-workspace",
+        label: t("sidebar.deleteWorkspace"),
+        icon: <TrashIcon />,
+        danger: true,
+        onSelect: ({ keepOpen }) => {
+          keepOpen();
+          askProjectRemove(project.key, true);
+        },
+      },
+    ];
+  };
+
+  // A menu's delete question (a project's "Delete all sessions…", the
+  // archive's deletes); its counts are live.
+  const deleteQuestionBody = ({ heading, headingTitle, notes, count, onConfirm, onCancel }: {
+    heading: string;
+    headingTitle?: string;
+    notes: string[];
+    count: number;
+    onConfirm: () => void;
+    onCancel: () => void;
+  }): ReactNode => (
+    <div className="sidebar-menu-question">
+      <div className="sidebar-menu-header" title={headingTitle}>{heading}</div>
+      {notes.map((note) => <p key={note} className="sidebar-menu-question-text">{note}</p>)}
+      <div className="sidebar-menu-question-buttons">
+        <button type="button" className="sidebar-menu-question-confirm" disabled={count === 0} onClick={onConfirm}>
+          {t("sidebar.deleteCount", { count })}
+        </button>
+        {!isMobile && (
+          <button type="button" className="sidebar-menu-question-cancel" data-sidebar-menu-autofocus="" onClick={onCancel}>
+            {t("sidebar.cancel")}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+
+  const projectDeleteBody = (project: SidebarProject): ReactNode => {
+    const { ids, running } = familiesToDelete(treeSelectionInput, project.key);
+    return deleteQuestionBody({
+      heading: t("sidebar.deleteProjectSessionsHeading", { name: project.name }),
+      headingTitle: project.root,
+      notes: [
+        t("sidebar.deleteProjectSessionsMessage"),
+        ...(running > 0 ? [t("sidebar.deleteProjectSessionsRunning", { count: running })] : []),
+      ],
+      count: ids.length,
+      onConfirm: () => deleteAllProjectSessions(project),
+      onCancel: () => askProjectDelete(project.key, false),
+    });
+  };
+
+  // The question of "Delete workspace…": what becomes of the sessions. Keeping
+  // them (archived) loses nothing, so it comes first; deleting them is the red
+  // one and only offered when there are sessions to delete. The buttons stack:
+  // their labels do not fit side by side. Cancel has the focus (the sheet's own
+  // on a phone), so Enter deletes nothing.
+  const projectRemoveBody = (project: SidebarProject): ReactNode => {
+    const { ids, running } = familiesToDelete(treeSelectionInput, project.key);
+    return (
+      <div className="sidebar-menu-question">
+        <div className="sidebar-menu-header" title={project.root}>{t("sidebar.deleteWorkspaceHeading", { name: project.name })}</div>
+        <p className="sidebar-menu-question-text">{t("sidebar.deleteWorkspaceMessage")}</p>
+        {ids.length > 0 && <p className="sidebar-menu-question-text">{t("sidebar.deleteWorkspaceSessions")}</p>}
+        {running > 0 && <p className="sidebar-menu-question-text">{t("sidebar.deleteProjectSessionsRunning", { count: running })}</p>}
+        <div className="sidebar-menu-question-buttons is-stacked">
+          <button type="button" className="sidebar-menu-question-keep" onClick={() => removeWorkspace(project, false)}>
+            {t(ids.length > 0 ? "sidebar.deleteWorkspaceKeep" : "sidebar.deleteWorkspaceOnly")}
+          </button>
+          {ids.length > 0 && (
+            <button type="button" className="sidebar-menu-question-confirm" onClick={() => removeWorkspace(project, true)}>
+              {t("sidebar.deleteWorkspaceAndSessions", { count: ids.length })}
+            </button>
+          )}
+          {!isMobile && (
+            <button type="button" className="sidebar-menu-question-cancel" data-sidebar-menu-autofocus="" onClick={() => askProjectRemove(project.key, false)}>
+              {t("sidebar.cancel")}
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  const archiveGroupMenuItems = (project: SidebarProject): SidebarMenuItem[] => {
+    const ids = archiveDeleteIds({ projectKey: project.key });
+    return [
+      {
+        type: "item",
+        id: "restore-all",
+        label: t("sidebar.restoreAllArchived", { count: ids.length }),
+        icon: <RestoreIcon />,
+        disabled: ids.length === 0,
+        onSelect: () => restoreFamilies(familiesOf(ids)),
+      },
+      { type: "separator", id: "separator-delete" },
+      {
+        type: "item",
+        id: "delete-all",
+        label: t("sidebar.deleteAllArchived", { count: ids.length }),
+        icon: <TrashIcon />,
+        danger: true,
+        disabled: ids.length === 0,
+        onSelect: ({ keepOpen }) => {
+          keepOpen();
+          askArchiveDelete("all");
+        },
+      },
+    ];
+  };
+
+  const archiveMenuItems = (): SidebarMenuItem[] => {
+    const all = archiveDeleteIds("all");
+    const old = archiveDeleteIds("old");
+    const folded = archiveGroups.filter((row) => !row.expanded).length;
+    return [
+      {
+        type: "item",
+        id: "collapse-all",
+        label: t("sidebar.collapseAllGroups"),
+        icon: <ChevronIcon />,
+        disabled: folded === archiveGroups.length,
+        onSelect: () => setAllArchiveGroupsExpanded(false),
+      },
+      {
+        type: "item",
+        id: "expand-all",
+        label: t("sidebar.expandAllGroups"),
+        icon: <ChevronIcon className="sidebar-icon-down" />,
+        disabled: folded === 0,
+        onSelect: () => setAllArchiveGroupsExpanded(true),
+      },
+      { type: "separator", id: "separator-sessions" },
+      {
+        type: "item",
+        id: "restore-all",
+        label: t("sidebar.restoreAllArchived", { count: all.length }),
+        icon: <RestoreIcon />,
+        disabled: all.length === 0,
+        onSelect: () => restoreFamilies(familiesOf(all)),
+      },
+      {
+        type: "item",
+        id: "delete-old",
+        label: t("sidebar.deleteOldArchived", { count: old.length }),
+        icon: <TrashIcon />,
+        danger: true,
+        disabled: old.length === 0,
+        onSelect: ({ keepOpen }) => {
+          keepOpen();
+          askArchiveDelete("old");
+        },
+      },
+      {
+        type: "item",
+        id: "delete-all",
+        label: t("sidebar.deleteAllArchived", { count: all.length }),
+        icon: <TrashIcon />,
+        danger: true,
+        disabled: all.length === 0,
+        onSelect: ({ keepOpen }) => {
+          keepOpen();
+          askArchiveDelete("all");
+        },
+      },
+    ];
+  };
+
+  const archiveDeleteBody = (scope: ArchiveDeleteScope | { projectKey: string }, project: SidebarProject | null): ReactNode => deleteQuestionBody({
+    heading: project
+      ? t("sidebar.deleteArchivedInProjectHeading", { name: project.name })
+      : t(scope === "old" ? "sidebar.deleteOldArchivedHeading" : "sidebar.deleteAllArchivedHeading"),
+    headingTitle: project?.root,
+    notes: [t("sidebar.deleteArchivedMessage")],
+    count: archiveDeleteIds(scope).length,
+    onConfirm: () => deleteArchived(scope),
+    onCancel: () => askArchiveDelete(undefined),
+  });
+
+  let menuTitle: string | undefined;
+  let menuLabel = "";
+  // Room for "Archive sessions older than 7 days · N".
+  let menuWidth: number | undefined;
+  let menuItems: SidebarMenuItem[] | undefined;
+  let menuBody: ReactNode = null;
+  if (menu?.kind === "row" && menuRow) {
+    menuTitle = sessionRowTitle(menuRow.family.root);
+    menuLabel = t("sidebar.sessionActions");
+    menuItems = sessionMenuItems(menuRow);
+  } else if (menu?.kind === "group") {
+    // The project as the tree has it now: pinned, unpinned, renamed or moved in another window while the menu is open.
+    const project = projectByKey.get(menu.project.key) ?? menu.project;
+    menuTitle = project.name;
+    menuLabel = t("sidebar.projectActions", { name: project.name });
+    menuItems = groupMenuItems(project, menu.olderCount);
+    if (menu.askDelete) menuBody = projectDeleteBody(project);
+    else if (menu.askRemove) menuBody = projectRemoveBody(project);
+    menuWidth = 264;
+  } else if (menu?.kind === "archive-group") {
+    const project = archiveGroups.find((row) => row.project.key === menu.project.key)?.project ?? menu.project;
+    menuTitle = project.name;
+    menuLabel = t("sidebar.archivedProjectActions", { name: project.name });
+    menuItems = archiveGroupMenuItems(project);
+    if (menu.askDelete) menuBody = archiveDeleteBody({ projectKey: project.key }, project);
+    menuWidth = 248;
+  } else if (menu?.kind === "archive") {
+    menuTitle = t("sidebar.archived");
+    menuLabel = t("sidebar.archiveActions");
+    menuItems = archiveMenuItems();
+    if (menu.askDelete) menuBody = archiveDeleteBody(menu.askDelete, null);
+    menuWidth = 280;
+  }
+
+  // The tree row (and the button in it) that the open menu belongs to.
+  const activeMenuRowKey = menu?.kind === "row"
+    ? menu.row.key
+    : menu?.kind === "group" ? `group:${menu.project.key}`
+    : menu?.kind === "archive-group" ? `archive:${menu.project.key}` : null;
+
+  const treeLayout = isMobile ? "mobile" : "desktop";
+  // Until pins and archive have loaded, archived rows would flash in.
+  const treeLoading = loading || !uiStateLoaded;
+  const treeProps = {
+    layout: treeLayout,
+    loading: treeLoading,
+    error,
+    renamingRootId,
+    renamingProjectKey,
+    confirmDeleteRootId,
+    activeMenuRowKey,
+    onSelectFamily: handleSelectFamily,
+    onToggleGroup: handleToggleGroup,
+    onShowMore: handleShowMore,
+    onShowLess: handleShowLess,
+    onTogglePinned: handleTogglePinned,
+    onArchiveFamily: archiveFamily,
+    onRestoreFamily: restoreFamily,
+    onOpenRowMenu: openRowMenu,
+    onRowContextMenu: handleContextMenu,
+    onRenameCommit: (family: SessionFamily, value: string) => { void commitRename(family, value); },
+    onRenameCancel: () => setRenamingRootId(null),
+    onRenameProjectCommit: commitProjectRename,
+    onRenameProjectCancel: () => { if (renamingProjectKey) endProjectRename(renamingProjectKey); },
+    onDeleteConfirm: (family: SessionFamily) => { void performDelete(family); },
+    onDeleteCancel: () => {
+      const rootId = confirmDeleteRootId;
+      setConfirmDeleteRootId(null);
+      // Cancel goes with the confirmation: the row's own button takes focus.
+      if (rootId) focusAfterCommit(() => familyRowButton(rootId));
+    },
+    onGroupNew: handleGroupNew,
+    onGroupMenu: handleGroupMenu,
+    onPinEmptyGroup: (project: SidebarProject) => {
+      void applyUiState({ action: "pin-project", projectKey: project.key, root: project.root, pinned: true });
+      // The button goes with the pin: its group's header takes the focus.
+      focusAfterCommit(() => groupHeaderButton(project.key));
+    },
+    onToggleArchiveGroup: handleToggleArchiveGroup,
+    onArchiveGroupMenu: handleArchiveGroupMenu,
+    onOpenOtherProject: handleOpenOtherProject,
+    onOpenArchive: () => openArchiveView(),
+    // The archive view has no group rows: only the main tree's can be dragged.
+    onMoveGroup: moveProject,
+  } as const;
+
+  const explorerCwd = selectedCwd ?? selectedCwdProp ?? null;
+  const changedFilesTitle = explorerCwd && changesCount > 0 ? t("sidebar.changedFiles", { count: changesCount }) : undefined;
+  // The changes view's key turns disabled once nothing is changed (a
+  // commit, a revert), under a keyboard user too. The browser blurs it to
+  // the page only at its next rendering update (current Chromium), after
+  // this effect, and that blur clears the root's note, so nothing would try
+  // again: while the note still names the key, its focus goes now to the
+  // nearest key still enabled (the file search after it below the
+  // sessions, the ignored-files switch before it in the tab).
+  const changesKeyRef = useRef<HTMLButtonElement>(null);
+  const changesKeyDisabled = !explorerCwd || changesCount === 0;
+  useLayoutEffect(() => {
+    const key = changesKeyRef.current;
+    if (!changesKeyDisabled || !key || sidebarFocusRef.current !== key) return;
+    handOffDisabledKeyFocus(document, key, selectedTabButton());
+  }, [changesKeyDisabled, selectedTabButton]);
+  // The toolbar row's search button searches the files on the files tab:
+  // the head has no search of its own. Below the sessions it is the
+  // sessions' search alone; the files section's header has the files'.
+  const sessionsShown = stacked || sidebarTab === "sessions";
+  const searchesFiles = !stacked && sidebarTab === "files" && explorerCwd !== null;
+  // What the toolbar row's widths depend on: New's label, and the tabs (the
+  // chosen tab's label is bolder, the files tab carries the count). The
+  // brand's text reports its own changes (fitHeader).
+  const fitHeader = useHeaderFit(headerRef, (stacked
+    ? ["below", t("sidebar.new")]
+    : ["tabs", t("sidebar.tabSessions"), t("sidebar.tabFiles"), t("sidebar.new"), explorerCwd && changesCount > 0 ? changesCount : "", sidebarTab]
+  ).join("\n"));
+  const archivedCount = model.archivedCount;
+
+  // The files' keys: below the sessions in the files section's header row,
+  // in the files tab in the row under the picker. Always the same ones in
+  // the same places; without a folder they wait, disabled. Their icons are
+  // 13px in the header row (smaller keys there, beside the label), 14px in the
+  // files tab's row.
+  const keyIconSize = stacked ? 13 : 14;
+  const terminalButton = (
+    <ToolbarIconButton
+      onClick={() => { if (explorerCwd) onOpenTerminal?.(explorerCwd); }}
+      disabled={!explorerCwd || !onOpenTerminal}
+      title={t("terminal.open")}
+    >
+      <TerminalIcon size={keyIconSize} />
+    </ToolbarIconButton>
+  );
+  const fileManagerButton = (
+    <ToolbarIconButton
+      onClick={() => {
+        void openInFileManager().then((failed) => {
+          // Its failure shows in the files' body. Below the sessions this key
+          // is in the header row, there while the section is folded too: a
+          // folded section opens, else the message would wait unseen.
+          if (failed && stacked) setFilesSectionCollapsed(false);
+        });
+      }}
+      disabled={!explorerCwd || fileManagerUnavailable}
+      title={fileManagerUnavailable
+        ? t(fileManager?.reason === "remote" ? "sidebar.openInExplorerRemoteOnly" : "sidebar.openInExplorerUnsupported")
+        : fileManagerLabel}
+    >
+      <FolderIcon size={keyIconSize} />
+    </ToolbarIconButton>
+  );
+  const uploadButton = (
+    <ToolbarIconButton
+      onClick={() => {
+        // The upload's progress and summary are the tree's: a folded section opens.
+        if (stacked && filesCollapsed) setFilesSectionCollapsed(false);
+        fileExplorerRef.current?.openUploadPicker();
+      }}
+      disabled={!explorerCwd || explorerUploadBusy}
+      title={t("sidebar.uploadFilesTitle")}
+    >
+      <UploadIcon size={keyIconSize} />
+    </ToolbarIconButton>
+  );
+  const refreshButton = (
+    <ToolbarIconButton
+      onClick={() => {
+        if (onExplorerRefresh) onExplorerRefresh();
+        else setExplorerKey((k) => k + 1);
+        setExplorerRefreshDone(true);
+        if (explorerRefreshTimerRef.current) clearTimeout(explorerRefreshTimerRef.current);
+        explorerRefreshTimerRef.current = setTimeout(() => setExplorerRefreshDone(false), 2000);
+      }}
+      disabled={!explorerCwd}
+      title={t("sidebar.refreshExplorer")}
+      done={explorerRefreshDone}
+    >
+      {explorerRefreshDone ? <CheckIcon size={keyIconSize} /> : <RefreshIcon size={keyIconSize} />}
+    </ToolbarIconButton>
+  );
+  const ignoredFilesButton = (className?: string) => (
+    <ToolbarIconButton
+      onClick={() => {
+        const next = !showIgnoredFiles;
+        setShowIgnoredFiles(next);
+        saveShowIgnoredFiles(next);
+      }}
+      disabled={!explorerCwd}
+      title={t("sidebar.showIgnoredFiles")}
+      pressed={showIgnoredFiles}
+      className={className}
+    >
+      <EyeIcon size={keyIconSize} />
+    </ToolbarIconButton>
+  );
+  // The tree's second view, its changes: there without changes too,
+  // disabled, so nothing moves as an agent edits files and commits.
+  const changesButton = (
+    <ToolbarIconButton
+      ref={changesKeyRef}
+      onClick={() => {
+        // Below the sessions this key is in the header row, there while the
+        // section is folded too: a folded section opens on the changes.
+        if (stacked && filesCollapsed) {
+          setFilesSectionCollapsed(false);
+          setChangesCollapsed(false);
+          return;
+        }
+        setChangesCollapsed((collapsed) => !collapsed);
+      }}
+      disabled={changesKeyDisabled}
+      title={t("sidebar.changedFiles", { count: changesCount })}
+      pressed={!changesKeyDisabled && !changesCollapsed}
+    >
+      <ChangesIcon size={keyIconSize} />
+    </ToolbarIconButton>
   );
 
   return (
     <div
-      ref={sessionPaneResizer.panelRef}
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        height: "100%",
-        overflow: "hidden",
-        "--sidebar-session-pane-height": `${sessionPaneResizer.width}px`,
-      } as CSSProperties}
+      ref={setSidebarRoot}
+      className={`session-sidebar${stacked ? " is-files-below" : ""}${stacked && filesCollapsed ? " is-files-collapsed" : ""}${stacked && filesFold.moving ? " is-files-folding" : ""}${toast ? " has-toast" : ""}`}
+      style={{ "--sidebar-files-height": `${filesSizer.width}px` } as CSSProperties}
+      onFocus={(event) => { sidebarFocusRef.current = event.target; }}
+      onBlur={(event) => { if (event.relatedTarget === null && !document.hasFocus()) return; if (!event.currentTarget.contains(event.relatedTarget)) sidebarFocusRef.current = null; }}
     >
       {customPathOpen && (
         <DirectoryPicker
           initialPath={customPathValue}
           busy={customPathValidating}
           error={customPathError}
-          onCancel={() => {
-            setCustomPathOpen(false);
-            setCustomPathError(null);
-          }}
+          onCancel={() => closeFolderPicker(customPathOpen)}
           onSelect={(path) => void commitCustomPath(path)}
         />
       )}
-      {/* Header */}
-      <div
-        style={{
-          padding: "12px 10px 10px",
-          borderBottom: "1px solid var(--border)",
-          flexShrink: 0,
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-          <PiWebTitle />
-          <div style={{ display: "flex", gap: 6 }}>
+      {sharingSession && (
+        <ShareSessionDialog
+          sessionId={sharingSession.id}
+          onClose={() => setSharingSession(null)}
+        />
+      )}
+      {exportingSession && (
+        <ExportSessionDialog
+          sessionId={exportingSession.id}
+          onExported={(savedPath) => {
+            showToast(t("export.savedTo", { path: savedPath }));
+          }}
+          onClose={() => setExportingSession(null)}
+        />
+      )}
+      {importDialogCwd !== null && (
+        <ImportSessionDialog
+          cwd={importDialogCwd}
+          onImported={(importedSessionId) => {
+            setImportDialogCwd(null);
+            showToast(t("import.importedNotice"));
+            void loadSessions();
+            onSessionImported?.(importedSessionId);
+          }}
+          onClose={() => setImportDialogCwd(null)}
+        />
+      )}
+      {/* One toolbar row, in the cells of the chat's top bar beside it (its
+          line continues that bar's): Sessions | Files, then New and the
+          search of the tab in view. Only the two tabs are the tablist. With
+          the files below the sessions there is nothing to choose: the brand
+          stands there (the panel's anchor, the versions on a click), and
+          the search is the sessions'. */}
+      <div ref={headerRef} className="sidebar-header">
+        {stacked && <PiWebTitle onWidthChange={fitHeader} />}
+        {!stacked && (
+          <div className="sidebar-tabs-list" role="tablist" aria-label={t("sidebar.tabsLabel")}>
             <button
-              onClick={handleNewSession}
-              disabled={!selectedCwd}
-              style={{
-                display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
-                background: "var(--bg-hover)",
-                border: "1px solid var(--border)",
-                color: selectedCwd ? "var(--text-muted)" : "var(--text-dim)",
-                cursor: selectedCwd ? "pointer" : "not-allowed",
-                height: 32,
-                paddingLeft: 10,
-                paddingRight: 12,
-                borderRadius: 7,
-                fontSize: 12,
-                fontWeight: 500,
-                letterSpacing: "-0.01em",
-                flexShrink: 0,
-                transition: "background 0.12s, color 0.12s, border-color 0.12s",
-              }}
-             title={selectedCwd ? t("sidebar.newSessionTitle", { path: selectedCwd }) : t("sidebar.selectProject")}
-              onMouseEnter={(e) => {
-                if (!selectedCwd) return;
-                e.currentTarget.style.background = "var(--bg-selected)";
-                e.currentTarget.style.color = "var(--accent)";
-                e.currentTarget.style.borderColor = "rgba(37,99,235,0.35)";
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.background = "var(--bg-hover)";
-                e.currentTarget.style.color = selectedCwd ? "var(--text-muted)" : "var(--text-dim)";
-                e.currentTarget.style.borderColor = "var(--border)";
-              }}
+              ref={sessionsTabRef}
+              type="button"
+              role="tab"
+              id="session-sidebar-tab-sessions"
+              aria-selected={sidebarTab === "sessions"}
+              aria-controls="session-sidebar-panel-sessions"
+              tabIndex={sidebarTab === "sessions" ? 0 : -1}
+              className={`sidebar-tab${sidebarTab === "sessions" ? " is-selected" : ""}`}
+              onClick={() => switchTab("sessions")}
+              onKeyDown={handleTabKeyDown}
             >
-              <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
-                <line x1="6" y1="1" x2="6" y2="11" />
-                <line x1="1" y1="6" x2="11" y2="6" />
-              </svg>
-              {t("sidebar.new")}
+              <MessageIcon size={13} className="sidebar-tab-icon" />
+              <span className="sidebar-tab-label">{t("sidebar.tabSessions")}</span>
             </button>
             <button
+              ref={filesTabRef}
               type="button"
-              onClick={() => {
-                setSessionSearchOpen((open) => !open);
-                setWtDropdownOpen(false);
-              }}
-              title={t("sidebar.toggleSessionSearch")}
-              aria-label={t("sidebar.toggleSessionSearch")}
-              aria-expanded={sessionSearchOpen}
-              aria-controls="session-search-input"
-              className={`flex h-[32px] w-[32px] shrink-0 cursor-pointer items-center justify-center rounded-[7px] border border-border hover:bg-bg-selected focus-visible:outline-2 focus-visible:outline-accent ${sessionSearchOpen ? "bg-bg-selected text-accent" : "bg-bg-hover text-text-muted"}`}
+              role="tab"
+              id="session-sidebar-tab-files"
+              aria-selected={sidebarTab === "files"}
+              aria-controls="session-sidebar-panel-files"
+              tabIndex={sidebarTab === "files" ? 0 : -1}
+              title={changedFilesTitle}
+              className={`sidebar-tab${sidebarTab === "files" ? " is-selected" : ""}`}
+              onClick={() => switchTab("files")}
+              onKeyDown={handleTabKeyDown}
             >
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" />
-              </svg>
+              <FolderIcon size={13} className="sidebar-tab-icon" />
+              <span className="sidebar-tab-label">{t("sidebar.tabFiles")}</span>
+              {explorerCwd && changesCount > 0 && <span className="sidebar-tab-count" aria-hidden="true">{changesCount}</span>}
             </button>
           </div>
-        </div>
-
-        {/* CWD picker */}
-        <div ref={dropdownRef} style={{ position: "relative" }}>
-          <button
-            onClick={() => setDropdownOpen((v) => !v)}
-            title={selectedProject?.root ?? selectedCwd ?? ""}
-            style={{
-              width: "100%",
-              display: "flex",
-              alignItems: "center",
-              padding: "6px 10px",
-              background: selectedCwd ? "var(--bg-hover)" : "rgba(37,99,235,0.06)",
-              border: selectedCwd ? "1px solid var(--border)" : "1px solid rgba(37,99,235,0.4)",
-              borderRadius: 7,
-              cursor: "pointer",
-              fontSize: 12,
-              color: "var(--text)",
-              textAlign: "left",
-              transition: "border-color 0.15s, background 0.15s",
-            }}
-          >
-            {selectedCwd ? (
-              <PathLabel
-                text={displayCwd(selectedProject?.root ?? selectedCwd, homeDir)}
-                style={{
-                  flex: 1,
-                  fontFamily: "var(--font-mono)",
-                  fontSize: 11,
-                  color: "var(--text)",
-                }}
-              />
-            ) : (
-              <span
-                style={{
-                  flex: 1,
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                  fontFamily: "var(--font-mono)",
-                  fontSize: 11,
-                  color: "var(--text-dim)",
-                }}
-              >
-                 {initialSessionId && !restoredRef.current ? "" : t("sidebar.selectProject")}
-              </span>
-            )}
-            {hasOtherWorkspaceActivity && (
-              <span
-                title={t("sidebar.newActivity")}
-                aria-label={t("sidebar.newActivity")}
-                style={{
-                  width: 8,
-                  height: 8,
-                  borderRadius: "50%",
-                  flexShrink: 0,
-                  marginLeft: 6,
-                  background: "var(--accent)",
-                }}
-              />
-            )}
-          </button>
-
-          <AnimatedDropdown
-            open={dropdownOpen}
-            style={{
-              position: "absolute",
-              top: "calc(100% + 4px)",
-              left: 0,
-              right: 0,
-              zIndex: 100,
-              background: "var(--bg)",
-              border: "1px solid var(--border)",
-              borderRadius: 8,
-              boxShadow: "0 6px 20px rgba(0,0,0,0.10)",
-              overflow: "hidden",
-            }}
-          >
-              {showProjectFilter && (
-                <div style={{ padding: "6px 8px", borderBottom: "1px solid var(--border)" }}>
-                  <input
-                    value={projectFilter}
-                    onChange={(e) => setProjectFilter(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Escape") {
-                        setProjectFilter("");
-                        setDropdownOpen(false);
-                      }
-                    }}
-                     placeholder={t("sidebar.filterProjects")}
-                    autoFocus
-                    style={{
-                      width: "100%",
-                      fontSize: 11,
-                      fontFamily: "var(--font-mono)",
-                      padding: "5px 8px",
-                      border: "1px solid var(--border)",
-                      borderRadius: 5,
-                      outline: "none",
-                      background: "var(--bg)",
-                      color: "var(--text)",
-                      boxSizing: "border-box",
-                    }}
-                  />
-                </div>
-              )}
-              <div style={{ maxHeight: "min(50vh, 380px)", overflowY: "auto" }}>
-                {visibleProjects.map((project) => (
-                  <button
-                    key={project.key}
-                    onClick={() => {
-                      setSelectedCwd(project.root);
-                      setProjectFilter("");
-                      setCustomPathOpen(false);
-                      setCustomPathError(null);
-                      setDropdownOpen(false);
-                    }}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 7,
-                      width: "100%",
-                      padding: "8px 10px",
-                      background: "var(--bg)",
-                      border: "none",
-                      borderBottom: "1px solid var(--border)",
-                      color: project.key === selectedProject?.key ? "var(--text)" : "var(--text-muted)",
-                      cursor: "pointer",
-                      textAlign: "left",
-                      fontSize: 11,
-                      fontFamily: "var(--font-mono)",
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                    }}
-                    title={project.root}
-                  >
-                    {project.key === selectedProject?.key && (
-                      <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-                        <polyline points="1.5 5 4 7.5 8.5 2.5" />
-                      </svg>
-                    )}
-                    {project.key !== selectedProject?.key && <span style={{ width: 10, flexShrink: 0 }} />}
-                    <PathLabel text={displayCwd(project.root, homeDir)} style={{ flex: 1 }} />
-                    {showProjectActivity(projectActivity.get(project.key), t)}
-                  </button>
-                ))}
-                {visibleProjects.length === 0 && projectFilter.trim() && (
-                   <div style={{ padding: "8px 10px", fontSize: 11, color: "var(--text-dim)" }}>{t("sidebar.noMatchingProjects")}</div>
-                )}
-              </div>
-
-              {/* Default cwd shortcut */}
-              {!customPathOpen && (
-                <button
-                  onClick={(e) => { e.stopPropagation(); handleDefaultCwd(); }}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 7,
-                    width: "100%",
-                    padding: "8px 10px",
-                    background: "none",
-                    border: "none",
-                    borderTop: visibleProjects.length > 0 ? "1px solid var(--border)" : "none",
-                    color: "var(--text-muted)",
-                    cursor: "pointer",
-                    textAlign: "left",
-                    fontSize: 11,
-                  }}
-                >
-                  <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-                    <path d="M1 3A1 1 0 0 1 2 2H4L5 3.5H8.5a.5.5 0 0 1 .5.5v4a.5.5 0 0 1-.5.5h-7A.5.5 0 0 1 1 8V3Z" />
-                  </svg>
-                   <span>{t("sidebar.useDefaultDirectory")}</span>
-                </button>
-              )}
-
-              {/* Custom path directory picker */}
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  handleCustomPathClick();
-                }}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 7,
-                  width: "100%",
-                  padding: "8px 10px",
-                  background: "none",
-                  border: "none",
-                  color: "var(--text-muted)",
-                  cursor: "pointer",
-                  textAlign: "left",
-                  fontSize: 11,
-                }}
-              >
-                <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" style={{ flexShrink: 0 }}>
-                  <line x1="5" y1="1" x2="5" y2="9" />
-                  <line x1="1" y1="5" x2="9" y2="5" />
-                </svg>
-                <span>{t("sidebar.customPath")}</span>
-              </button>
-          </AnimatedDropdown>
-        </div>
-
-        {sessionSearchOpen && (
-          <input
-            id="session-search-input"
-            type="search"
-            autoFocus
-            value={sessionSearchQuery}
-            maxLength={200}
-            aria-label={t("sidebar.searchSessions")}
-            placeholder={t("sidebar.searchSessions")}
-            onChange={(event) => setSessionSearchQuery(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Escape") {
-                event.stopPropagation();
-                setSessionSearchQuery("");
-              }
-            }}
-            className="mt-[6px] block h-[29px] w-full min-w-0 rounded-[7px] border border-border bg-bg px-[10px] text-xs text-text focus:outline-2 focus:outline-accent"
-          />
         )}
-
-        {/* Worktree switcher — shown only for git projects at a checkout top
-            level (repo subdirs keep their own project identity, so switching
-            from them would jump projects). Rendered whenever the selected cwd
-            belongs to the loaded project (not just when forCwd matches), so
-            switching between worktrees of one project keeps the row mounted
-            instead of flickering while data refetches: all worktrees of a
-            project share the same list anyway. */}
-        {!sessionSearchOpen && showWorktreeSwitcher && (() => {
-          if (!worktreeState) return null;
-          const showWtFilter = worktreeState.worktrees.length >= 8;
-          const visibleWorktrees = showWtFilter && wtFilter.trim()
-            ? worktreeState.worktrees.filter((w) =>
-                (w.branch ?? displayCwd(w.path, homeDir)).toLowerCase().includes(wtFilter.trim().toLowerCase()))
-            : worktreeState.worktrees;
-          return (
-            <div ref={wtDropdownRef} style={{ position: "relative", marginTop: 6 }}>
-              <button
-                onClick={() => setWtDropdownOpen((v) => !v)}
-                 title={currentWorktree ? t("sidebar.switchWorktreeTitle", { path: currentWorktree.path }) : t("sidebar.switchWorktree")}
-                style={{
-                  width: "100%",
-                  height: 29,
-                  boxSizing: "border-box",
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 6,
-                  padding: "0 10px",
-                  background: "var(--bg-hover)",
-                  border: "1px solid var(--border)",
-                  borderRadius: 7,
-                  cursor: "pointer",
-                  fontSize: 11,
-                  lineHeight: 1.35,
-                  color: "var(--text-muted)",
-                  textAlign: "left",
-                }}
-              >
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, color: currentWorktree && !currentWorktree.isMain ? "var(--accent)" : "var(--text-dim)" }}>
-                  <line x1="6" y1="3" x2="6" y2="15" />
-                  <circle cx="18" cy="6" r="3" />
-                  <circle cx="6" cy="18" r="3" />
-                  <path d="M18 9a9 9 0 0 1-9 9" />
-                </svg>
-                <PathLabel
-                  text={currentWorktree ? (currentWorktree.branch ?? displayCwd(currentWorktree.path, homeDir)) : "…"}
-                  style={{ flex: 1, fontFamily: "var(--font-mono)", color: "var(--text)" }}
-                />
-                {currentWorktree?.isMain && (
-                   <span style={{ flexShrink: 0, color: "var(--text-dim)", fontSize: 10 }}>{t("sidebar.main")}</span>
-                )}
-                {worktreeState.worktrees.length > 1 && (
-                  <span style={{ flexShrink: 0, color: "var(--text-dim)", fontSize: 10 }}>
-                    {worktreeState.worktrees.length}
-                  </span>
-                )}
-                <svg width="9" height="9" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-                  <polyline points="2 3.5 5 6.5 8 3.5" />
-                </svg>
-              </button>
-
-              <AnimatedDropdown
-                open={wtDropdownOpen}
-                style={{
-                  position: "absolute",
-                  top: "calc(100% + 4px)",
-                  left: 0,
-                  right: 0,
-                  zIndex: 100,
-                  background: "var(--bg)",
-                  border: "1px solid var(--border)",
-                  borderRadius: 8,
-                  boxShadow: "0 6px 20px rgba(0,0,0,0.10)",
-                  overflow: "hidden",
-                }}
-              >
-                  {showWtFilter && (
-                    <div style={{ padding: "6px 8px", borderBottom: "1px solid var(--border)" }}>
-                      <input
-                        value={wtFilter}
-                        onChange={(e) => setWtFilter(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Escape") {
-                            setWtFilter("");
-                            setWtDropdownOpen(false);
-                          }
-                        }}
-                        placeholder={t("sidebar.filterWorktrees")}
-                        autoFocus
-                        style={{
-                          width: "100%",
-                          fontSize: 11,
-                          fontFamily: "var(--font-mono)",
-                          padding: "5px 8px",
-                          border: "1px solid var(--border)",
-                          borderRadius: 5,
-                          outline: "none",
-                          background: "var(--bg)",
-                          color: "var(--text)",
-                          boxSizing: "border-box",
-                        }}
-                      />
-                    </div>
-                  )}
-                  <div style={{ maxHeight: "min(40vh, 300px)", overflowY: "auto" }}>
-                    {visibleWorktrees.map((wt) => {
-                      const isCurrent = wt.path === currentWorktreePath;
-                      if (wtConfirmRemove === wt.path) {
-                        return (
-                          <div key={wt.path} style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 10px", borderBottom: "1px solid var(--border)", background: "rgba(239,68,68,0.06)" }}>
-                            <span style={{ flex: 1, fontSize: 11, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                              {t("sidebar.forceRemoveCheckout")}
-                            </span>
-                            <button
-                              onClick={() => void handleRemoveWorktree(wt.path, true)}
-                              disabled={wtBusy}
-                              style={{ padding: "3px 9px", background: "#ef4444", border: "none", borderRadius: 5, color: "#fff", fontSize: 11, fontWeight: 600, cursor: "pointer", flexShrink: 0 }}
-                            >
-                              {t("sidebar.force")}
-                            </button>
-                            <button
-                              onClick={() => setWtConfirmRemove(null)}
-                              style={{ padding: "3px 9px", background: "var(--bg-hover)", border: "1px solid var(--border)", borderRadius: 5, color: "var(--text-muted)", fontSize: 11, cursor: "pointer", flexShrink: 0 }}
-                            >
-                              {t("sidebar.cancel")}
-                            </button>
-                          </div>
-                        );
-                      }
-                      return (
-                        <div
-                          key={wt.path}
-                          className="wt-row"
-                          style={{ display: "flex", alignItems: "center", borderBottom: "1px solid var(--border)" }}
-                        >
-                          <button
-                            onClick={() => {
-                              setSelectedCwd(wt.path);
-                              setWtDropdownOpen(false);
-                              setWtError(null);
-                              setWtFilter("");
-                            }}
-                            title={wt.path}
-                            style={{
-                              flex: 1,
-                              minWidth: 0,
-                              display: "flex",
-                              alignItems: "center",
-                              gap: 7,
-                              padding: "8px 10px",
-                              background: "var(--bg)",
-                              border: "none",
-                              color: isCurrent ? "var(--text)" : "var(--text-muted)",
-                              cursor: "pointer",
-                              textAlign: "left",
-                              fontSize: 11,
-                              fontFamily: "var(--font-mono)",
-                            }}
-                          >
-                            {isCurrent ? (
-                              <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-                                <polyline points="1.5 5 4 7.5 8.5 2.5" />
-                              </svg>
-                            ) : (
-                              <span style={{ width: 10, flexShrink: 0 }} />
-                            )}
-                            <PathLabel text={wt.branch ?? displayCwd(wt.path, homeDir)} style={{ flex: 1 }} />
-                            {wt.isMain && <span style={{ flexShrink: 0, color: "var(--text-dim)", fontSize: 10 }}>{t("sidebar.main")}</span>}
-                          </button>
-                          {!wt.isMain && (
-                            <button
-                              onClick={() => void handleRemoveWorktree(wt.path, false)}
-                              disabled={wtBusy}
-                               title={t("sidebar.removeWorktreeTitle", { path: wt.path })}
-                              style={{
-                                display: "flex", alignItems: "center", justifyContent: "center",
-                                width: 34, height: 28, padding: 0, marginRight: 4,
-                                background: "none", border: "none",
-                                color: "var(--text-dim)", cursor: "pointer",
-                                borderRadius: 5, flexShrink: 0,
-                                transition: "color 0.12s, background 0.12s",
-                              }}
-                              onMouseEnter={(e) => { e.currentTarget.style.color = "#ef4444"; e.currentTarget.style.background = "rgba(239,68,68,0.08)"; }}
-                              onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-dim)"; e.currentTarget.style.background = "none"; }}
-                            >
-                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                <polyline points="3 6 5 6 21 6" />
-                                <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
-                                <path d="M10 11v6M14 11v6" />
-                                <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
-                              </svg>
-                            </button>
-                          )}
-                        </div>
-                      );
-                    })}
-                    {showWtFilter && visibleWorktrees.length === 0 && wtFilter.trim() && (
-                      <div style={{ padding: "8px 10px", fontSize: 11, color: "var(--text-dim)" }}>{t("sidebar.noMatchingWorktrees")}</div>
-                    )}
-                  </div>
-
-                  {!wtNewOpen ? (
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setWtNewOpen(true);
-                        setWtError(null);
-                        setTimeout(() => wtNewInputRef.current?.focus(), 0);
-                      }}
-                      title={t("sidebar.createWorktreeTitle")}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 7,
-                        width: "100%",
-                        padding: "8px 10px",
-                        background: "none",
-                        border: "none",
-                        color: "var(--text-muted)",
-                        cursor: "pointer",
-                        textAlign: "left",
-                        fontSize: 11,
-                      }}
-                    >
-                      <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" style={{ flexShrink: 0 }}>
-                        <line x1="5" y1="1" x2="5" y2="9" />
-                        <line x1="1" y1="5" x2="9" y2="5" />
-                      </svg>
-                       <span>{t("sidebar.newWorktree")}</span>
-                    </button>
-                  ) : (
-                    <div style={{ padding: "6px 8px" }}>
-                      <input
-                        ref={wtNewInputRef}
-                        value={wtNewBranch}
-                        onChange={(e) => {
-                          setWtNewBranch(e.target.value);
-                          setWtError(null);
-                        }}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") {
-                            e.preventDefault();
-                            void handleCreateWorktree();
-                          }
-                          if (e.key === "Escape") {
-                            setWtNewOpen(false);
-                            setWtNewBranch("");
-                            setWtError(null);
-                          }
-                        }}
-                         placeholder={t("sidebar.branchName")}
-                        style={{
-                          width: "100%",
-                          fontSize: 11,
-                          fontFamily: "var(--font-mono)",
-                          padding: "5px 8px",
-                          border: "1px solid var(--accent)",
-                          borderRadius: 5,
-                          outline: "none",
-                          background: "var(--bg)",
-                          color: "var(--text)",
-                          boxSizing: "border-box",
-                        }}
-                      />
-                      <div style={{ display: "flex", gap: 5, marginTop: 5 }}>
-                        <button
-                          onClick={() => void handleCreateWorktree()}
-                          disabled={wtBusy || !wtNewBranch.trim()}
-                          style={{
-                            flex: 1,
-                            padding: "4px 0",
-                            background: "var(--accent)",
-                            border: "none",
-                            borderRadius: 5,
-                            color: "var(--accent-contrast)",
-                            fontSize: 11,
-                            fontWeight: 600,
-                            cursor: wtBusy || !wtNewBranch.trim() ? "not-allowed" : "pointer",
-                            opacity: wtBusy || !wtNewBranch.trim() ? 0.65 : 1,
-                          }}
-                        >
-                           {wtBusy ? t("sidebar.creating") : t("sidebar.create")}
-                        </button>
-                        <button
-                          onClick={() => { setWtNewOpen(false); setWtNewBranch(""); setWtError(null); }}
-                          style={{
-                            flex: 1,
-                            padding: "4px 0",
-                            background: "var(--bg-hover)",
-                            border: "1px solid var(--border)",
-                            borderRadius: 5,
-                            color: "var(--text-muted)",
-                            fontSize: 11,
-                            cursor: "pointer",
-                          }}
-                        >
-                           {t("sidebar.cancel")}
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                  {wtError && (
-                    <div style={{
-                      padding: "5px 10px 8px",
-                      color: "#dc2626",
-                      fontSize: 11,
-                      lineHeight: 1.35,
-                      overflowWrap: "anywhere",
-                    }}>
-                      {wtError}
-                    </div>
-                  )}
-              </AnimatedDropdown>
-            </div>
-          );
-        })()}
-        {!sessionSearchOpen && inactiveWorktreeSelector && (
-          <button
-            type="button"
-            aria-disabled="true"
-            tabIndex={-1}
-            title={inactiveWorktreeSelector.title}
-            style={{
-              width: "100%",
-              height: 29,
-              boxSizing: "border-box",
-              marginTop: 6,
-              display: "flex",
-              alignItems: "center",
-              gap: 6,
-              padding: "0 10px",
-              border: "1px solid var(--border)",
-              borderRadius: 7,
-              background: "var(--bg-hover)",
-              color: "var(--text-dim)",
-              fontSize: 11,
-              lineHeight: 1.35,
-              whiteSpace: "nowrap",
-              textAlign: "left",
-              cursor: "default",
-              opacity: 0.82,
-            }}
-          >
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-              <line x1="6" y1="3" x2="6" y2="15" />
-              <circle cx="18" cy="6" r="3" />
-              <circle cx="6" cy="18" r="3" />
-              <path d="M18 9a9 9 0 0 1-9 9" />
-            </svg>
-            <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{inactiveWorktreeSelector.label}</span>
-          </button>
-        )}
+        <span className="sidebar-header-spacer" />
+        <button
+          type="button"
+          className="sidebar-new-button"
+          onClick={handleNewSession}
+          disabled={!selectedCwd}
+          title={selectedCwd ? t("sidebar.newSessionTitle", { path: selectedCwd }) : t("sidebar.selectProject")}
+        >
+          <PlusIcon size={12} />
+          <span className="sidebar-new-label">{t("sidebar.new")}</span>
+        </button>
+        <button
+          ref={searchButtonRef}
+          type="button"
+          onClick={() => {
+            // The search of the tab in view: the files tab's searches its
+            // files; without a folder there, it opens the sessions tab's.
+            if (searchesFiles) {
+              setFileSearchOpen((open) => !open);
+              return;
+            }
+            if (!sessionsShown) {
+              switchTab("sessions");
+              setSessionSearchOpen(true);
+              return;
+            }
+            setSessionSearchOpen((open) => !open);
+          }}
+          title={searchesFiles ? t("sidebar.searchFiles") : t("sidebar.toggleSessionSearch")}
+          aria-label={searchesFiles ? t("sidebar.searchFiles") : t("sidebar.toggleSessionSearch")}
+          aria-expanded={searchesFiles ? fileSearchOpen : sessionSearchOpen}
+          aria-controls={searchesFiles ? "file-search-input" : "session-search-input"}
+          className={`sidebar-search-toggle${(searchesFiles ? fileSearchOpen : sessionSearchOpen) ? " is-active" : ""}`}
+        >
+          <SearchIcon size={16} />
+        </button>
       </div>
 
-      {/* Session list */}
+      {/* Sessions: every project's sessions, or the archive. A tab's panel,
+          or the top section, always shown, filling what the files leave. */}
       <div
-        ref={sessionPaneRef}
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          flex: explorerOpen && (selectedCwdProp || selectedCwd)
-            ? "0 1 var(--sidebar-session-pane-height, 320px)"
-            : "1 1 auto",
-          minHeight: SESSION_PANE_MIN_HEIGHT,
-          overflow: "hidden",
-        }}
+        ref={sessionsPanelRef}
+        id="session-sidebar-panel-sessions"
+        role={stacked ? "region" : "tabpanel"}
+        aria-label={stacked ? t("sidebar.tabSessions") : undefined}
+        aria-labelledby={stacked ? undefined : "session-sidebar-tab-sessions"}
+        hidden={!stacked && sidebarTab !== "sessions"}
+        className="sidebar-panel sidebar-sessions-panel"
+        onScrollCapture={rememberScroll}
       >
-        <SessionSearch open={sessionSearchOpen} query={sessionSearchQuery} selectedSessionId={selectedSessionId} onSelectSession={handleSelectSessionFromList}>
-        <div
-          ref={listScrollRef}
-          onScroll={handleListScroll}
-          className="scrollbar-subtle"
-          style={{
-            flex: "1 1 auto",
-            minHeight: 0,
-            overflowY: "auto",
-            padding: "0",
-          }}
+        {sessionSearchOpen && (
+          <div className="sidebar-search">
+            <input
+              id="session-search-input"
+              type="search"
+              autoFocus
+              value={sessionSearchQuery}
+              maxLength={200}
+              aria-label={t("sidebar.searchSessions")}
+              placeholder={t("sidebar.searchSessions")}
+              onChange={(event) => setSessionSearchQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape" && !event.nativeEvent.isComposing && event.keyCode !== 229) {
+                  event.stopPropagation();
+                  setSessionSearchQuery("");
+                }
+              }}
+              className="sidebar-search-input"
+            />
+          </div>
+        )}
+        <SessionSearch
+          open={sessionSearchOpen}
+          query={sessionSearchQuery}
+          selectedSessionId={selectedSessionId}
+          onSelectSession={handleSelectSessionFromList}
+          archivedSessionIds={archiveIndex.ids}
         >
-        {loading && (
-          <div style={{ padding: "16px 14px", color: "var(--text-muted)", fontSize: 12 }}>
-            {t("sidebar.loading")}
-          </div>
-        )}
-        {error && (
-          <div style={{ padding: "12px 14px", color: "#f87171", fontSize: 12 }}>
-            {error}
-          </div>
-        )}
-        {!loading && !error && sessionFamilies.length === 0 && (
-          <div style={{ padding: "16px 14px", color: "var(--text-muted)", fontSize: 12 }}>
-            {t("sidebar.noSessions")}
-          </div>
-        )}
-        {sessionFamilies.length > 0 && (
-          <div
-            style={{
-              position: "relative",
-              height: sessionFamilies.length * SESSION_LIST_ITEM_HEIGHT,
-            }}
-          >
-            {virtualIndices.map((index) => {
-              const family = sessionFamilies[index];
-              const familySessions = [family.root, ...family.subagents];
-              const displaySession = family.latestModified === family.root.modified
-                ? family.root
-                : { ...family.root, modified: family.latestModified };
-              // Bubble blur after the input's save handler before unpinning the row.
-              return (
-                <div
-                  key={family.root.id}
-                  onFocus={() => setFocusedSessionId(family.root.id)}
-                  onBlur={() => setFocusedSessionId(null)}
-                  style={{ position: "absolute", top: index * SESSION_LIST_ITEM_HEIGHT, left: 0, right: 0 }}
-                >
-                  <SessionItem
-                    session={displaySession}
-                    isSelected={familySessions.some((session) => session.id === selectedSessionId)}
-                    isRunning={familySessions.some((session) => runningSessionIds.has(session.id))}
-                    isUnread={familySessions.some((session) => unreadSessionIds.has(session.id))}
-                    onClick={() => handleSelectSessionFromList(family.root)}
-                    onRenamed={loadSessions}
-                    onDeleted={(id) => {
-                      onSessionDeleted?.(id);
-                      loadSessions();
-                    }}
-                  />
+          {/* The tree and the archive view share one cell: the archive
+              slides in over the tree and away from it again. */}
+          <div className="sidebar-sessions-views">
+            {/* Kept mounted under the archive view, so going back finds it as
+                it was: inert while the archive slides in, then hidden. */}
+            <div className="sidebar-sessions-view" hidden={archiveMotion.mainHidden} inert={archiveMotion.mainInert}>
+              <SessionTree
+                {...treeProps}
+                rows={model.rows}
+                emptyLabel={t("sidebar.noSessions")}
+                reveal={treeReveal}
+                onRevealHandled={handleRevealHandled}
+              />
+            </div>
+            {/* Mounted while open and on its way out, inert then, so nothing
+                in it is clicked twice; the tree is back under it at once. */}
+            {archiveMotion.archiveMounted && (
+              <div
+                className={`sidebar-sessions-view sidebar-archive-view${archiveMotion.archiveClass ? ` ${archiveMotion.archiveClass}` : ""}`}
+                inert={archiveMotion.archiveInert}
+                onAnimationEnd={(event) => { if (event.target === event.currentTarget) endArchiveMotion(); }}
+              >
+                <div className="sidebar-archive-bar">
+                  <button
+                    ref={archiveBackRef}
+                    type="button"
+                    className="sidebar-archive-back"
+                    title={t("sidebar.backToSessions")}
+                    aria-label={`${t("sidebar.backToSessions")}: ${t("sidebar.archivedCount", { count: archivedCount })}`}
+                    onClick={() => setArchiveView(false)}
+                  >
+                    <ChevronIcon size={13} className="sidebar-icon-back" />
+                    <span>{t("sidebar.archived")}</span>
+                    <span className="sidebar-archive-count">· {archivedCount}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`sidebar-archive-menu-button${menu?.kind === "archive" ? " is-active" : ""}`}
+                    title={t("sidebar.archiveActions")}
+                    aria-label={t("sidebar.archiveActions")}
+                    aria-haspopup="menu"
+                    aria-expanded={menu?.kind === "archive"}
+                    disabled={archiveGroups.length === 0}
+                    onClick={(event) => openArchiveMenu(event.currentTarget)}
+                  >
+                    <MoreIcon size={13} />
+                  </button>
                 </div>
-              );
-            })}
+                <SessionTree
+                  {...treeProps}
+                  rows={archiveRows}
+                  emptyLabel={t("sidebar.noArchived")}
+                  reveal={archiveReveal}
+                  onRevealHandled={handleArchiveRevealHandled}
+                />
+              </div>
+            )}
           </div>
-        )}
-        </div>
         </SessionSearch>
       </div>
 
-      {explorerOpen && (selectedCwdProp || selectedCwd) && (
+      {/* Below the sessions, the separator: drag, arrows, Home/End, Enter
+          or a double-click to reset (useResizablePanel). Only while the
+          files section is open and still: a drag never meets the fold's
+          height transition. */}
+      {stacked && filesFold.open && (
         <div
-          className={`sidebar-section-resize-handle${sessionPaneResizer.isResizing ? " is-resizing" : ""}`}
-          data-resize-handle="sidebar-sections"
-          title={`${t("layout.resizeSidebarSections")}: ${t("layout.resizeHeightHint")}`}
-          style={{
-            position: "relative",
-            zIndex: 20,
-            width: "100%",
-            height: 12,
-            margin: "-6px 0",
-            flex: "0 0 12px",
-            cursor: "row-resize",
-            touchAction: "none",
-          }}
-          {...sessionPaneResizer.separatorProps}
+          {...filesSizer.separatorProps}
+          aria-controls="session-sidebar-panel-files"
+          className={`panel-resize-handle sidebar-files-resize-handle${filesSizer.isResizing ? " is-resizing" : ""}`}
+          data-resize-handle="sidebar-files"
+          title={`${t("sidebar.resizeFiles")}: ${t("sidebar.resizeFilesHint")}`}
         />
       )}
 
-      {/* File Explorer section */}
-      {(selectedCwdProp || selectedCwd) && (
-        <div
-          ref={explorerSectionRef}
-          style={{
-            borderTop: "1px solid var(--border)",
-            display: "flex",
-            flexDirection: "column",
-            flex: explorerOpen ? "1 1 0" : "0 0 auto",
-            minHeight: explorerOpen ? EXPLORER_PANE_MIN_HEIGHT : 0,
-            overflow: "hidden",
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center", flexShrink: 0 }}>
+      {/* Files: the project and worktree in use, and its files. A tab's
+          panel, or the section below the sessions, under a header row of its
+          own that folds it (only that row then shows, at the bottom). */}
+      <div
+        ref={filesPanelRef}
+        id="session-sidebar-panel-files"
+        role={stacked ? "region" : "tabpanel"}
+        aria-label={stacked ? t("sidebar.tabFiles") : undefined}
+        aria-labelledby={stacked ? undefined : "session-sidebar-tab-files"}
+        hidden={!stacked && sidebarTab !== "files"}
+        className="sidebar-panel sidebar-files-panel"
+        onScrollCapture={rememberScroll}
+        onTransitionEnd={(event) => { if (event.target === event.currentTarget && event.propertyName === "height") endFilesFold(); }}
+      >
+        {/* Below the sessions, one row: the section's toggle (its label,
+            then the count, give way first), then the files' keys at its
+            right end, in the files tab's order with the search last. They
+            stay in this row while the section is folded. */}
+        {stacked && (
+          <div className="sidebar-files-section">
             <button
-              onClick={() => setExplorerOpen((open) => {
-                const next = !open;
-                saveExplorerOpen(next);
-                return next;
-              })}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                flex: 1,
-                padding: "6px 10px",
-                background: "none",
-                border: "none",
-                color: "var(--text-muted)",
-                cursor: "pointer",
-                fontSize: 11,
-                fontWeight: 600,
-                letterSpacing: "0.05em",
-                textTransform: "uppercase",
-                textAlign: "left",
-              }}
+              type="button"
+              className="sidebar-files-section-toggle"
+              aria-expanded={!filesCollapsed}
+              aria-controls="session-sidebar-files-body"
+              title={changedFilesTitle}
+              onClick={() => setFilesSectionCollapsed(!filesCollapsed)}
             >
-              <svg
-                width="9" height="9" viewBox="0 0 10 10" fill="none"
-                stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"
-                style={{ transform: explorerOpen ? "rotate(90deg)" : "none", transition: "transform 0.15s", flexShrink: 0 }}
-              >
-                <polyline points="3 2 7 5 3 8" />
-              </svg>
-              {t("files.explorer")}
+              <ChevronIcon size={12} strokeWidth={3} className={`session-tree-chevron${filesCollapsed ? "" : " is-open"}`} />
+              <span className="sidebar-files-section-label">{t("sidebar.tabFiles")}</span>
+              {/* As the pinned section's count; the changes key says it to a screen reader. */}
+              {changedFilesTitle && <span className="sidebar-files-section-count" aria-hidden="true">· {changesCount}</span>}
             </button>
-            {onOpenTerminal && (
-              <ToolbarIconButton
-                onClick={() => onOpenTerminal(selectedCwd ?? selectedCwdProp!)}
-                title={t("terminal.open")}
-                color="var(--text-dim)"
-              >
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <polyline points="4 17 10 11 4 5" /><line x1="12" y1="19" x2="20" y2="19" />
-                </svg>
-              </ToolbarIconButton>
-            )}
-            {explorerOpen && changesCount > 0 && (
-              <ToolbarIconButton
-                onClick={() => setChangesCollapsed((v) => !v)}
-                title={t("sidebar.changedFiles", { count: changesCount })}
-                ariaPressed={!changesCollapsed}
-                color={changesCollapsed ? "var(--text-dim)" : "var(--accent)"}
-                background={changesCollapsed ? "none" : "var(--bg-selected)"}
-              >
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <circle cx="12" cy="12" r="3" />
-                  <path d="M3 12h6" />
-                  <path d="M15 12h6" />
-                </svg>
-              </ToolbarIconButton>
-            )}
-            {explorerOpen && (
+            <div className="sidebar-files-keys" role="group" aria-label={t("sidebar.fileActions")}>
+              {terminalButton}
+              {fileManagerButton}
+              {uploadButton}
+              {refreshButton}
+              {ignoredFilesButton()}
+              {changesButton}
               <ToolbarIconButton
                 onClick={() => {
+                  // Folded, the section opens first, with the field open and focused.
+                  if (filesCollapsed) {
+                    setFileSearchOpen(true);
+                    revealFiles("file-search");
+                    return;
+                  }
                   setFileSearchOpen((open) => !open);
                 }}
+                disabled={!explorerCwd}
                 title={t("sidebar.searchFiles")}
-                ariaPressed={fileSearchOpen}
-                color={fileSearchOpen ? "var(--accent)" : "var(--text-dim)"}
-                background={fileSearchOpen ? "var(--bg-selected)" : "none"}
+                expanded={fileSearchOpen}
+                controls="file-search-input"
               >
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" />
-                </svg>
+                <SearchIcon size={13} />
               </ToolbarIconButton>
-            )}
-            {explorerOpen && (
-              <ToolbarIconButton
-                onClick={() => fileExplorerRef.current?.openUploadPicker()}
-                disabled={explorerUploadBusy}
-                title={t("sidebar.uploadFilesTitle")}
-                color="var(--text-dim)"
-              >
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                  <path d="m17 8-5-5-5 5" />
-                  <path d="M12 3v12" />
-                </svg>
-              </ToolbarIconButton>
-            )}
-            <ToolbarIconButton
-              onClick={() => {
-                if (onExplorerRefresh) onExplorerRefresh();
-                else setExplorerKey((k) => k + 1);
-                setExplorerRefreshDone(true);
-                if (explorerRefreshTimerRef.current) clearTimeout(explorerRefreshTimerRef.current);
-                explorerRefreshTimerRef.current = setTimeout(() => setExplorerRefreshDone(false), 2000);
-              }}
-              title={t("sidebar.refreshExplorer")}
-              skipHover={explorerRefreshDone}
-              color={explorerRefreshDone ? "#4ade80" : "var(--text-dim)"}
-              background={explorerRefreshDone ? "rgba(74,222,128,0.18)" : "none"}
-              marginRight={6}
-            >
-              {explorerRefreshDone ? (
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#4ade80" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                  <polyline points="20 6 9 17 4 12" />
-                </svg>
-              ) : (
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-                  <path d="M3 3v5h5" />
-                </svg>
-              )}
-            </ToolbarIconButton>
+            </div>
           </div>
-          {explorerOpen && (
-            <div ref={explorerScrollRef} className="scrollbar-subtle" style={{ flex: 1, overflowY: "auto", overflowX: "hidden" }}>
+        )}
+        {/* Everything under that header row: hidden while the section is
+            folded, never unmounted. Shown from the start of an unfold, and
+            until the end of a fold, inert then. */}
+        <div id="session-sidebar-files-body" className="sidebar-files-body" hidden={stacked && filesFold.bodyHidden} inert={stacked && filesFold.bodyInert}>
+          {/* One head: the folder in use, then (in the files tab) what is
+              done with it; below the sessions the keys are the header row's.
+              The buttons are the head's, not the picker's: its group names
+              only the project and worktree. */}
+          <div className="sidebar-files-head">
+            {/* The project and worktree in use: the same picker as the bar above a
+                fresh composer, as two boxes, side by side below the sessions,
+                one under the other in the files tab (the same instance: a
+                layout switch never remounts it). Its worktree box shows only at the
+                top of a git checkout (repo subdirs keep their own project
+                identity, so switching from them would jump projects); a disabled
+                box says why in a subdirectory, and a folder outside git has
+                none. The list comes from the loaded project
+                (not just its forCwd), so switching between worktrees of one
+                project keeps the box instead of flickering while it refetches. */}
+            <ProjectWorktreePicker
+              handleRef={filesPickerRef}
+              layout={stacked ? "row" : "stacked"}
+              context={newSessionContext ?? { project: null, worktrees: null, currentWorktreePath: null, projects: projectChoiceList }}
+              mobile={isMobile}
+              label={t("sidebar.projectAndWorktree")}
+              placeholder={initialSessionId && !restoredRef.current ? "" : t("sidebar.selectProject")}
+              homeDir={homeDir}
+              projectActivity={projectActivity}
+              worktreeHint={inactiveWorktreeSelector}
+              newWorktreeTitle={t("sidebar.createWorktreeTitle")}
+              onPick={handleFilesPick}
+              onUseDefaultDirectory={() => { void handleDefaultCwd(); }}
+              onOpenFolder={handleCustomPathClick}
+              onRefreshWorktrees={refreshWorktrees}
+              onCreateWorktree={createWorktree}
+              onRemoveWorktree={handleRemoveWorktree}
+            />
+            {/* The files tab's keys, under the picker. Always the same
+                buttons in the same places: the changes view stays (disabled)
+                while there is nothing changed, so nothing moves as an agent
+                edits files and commits. The folder's actions first, the
+                tree's two views last (what it lists, then its changes); its
+                search is the toolbar row's search button. */}
+            {!stacked && explorerCwd && (
+              <div className="sidebar-files-actions" role="group" aria-label={t("sidebar.fileActions")}>
+                {onOpenTerminal && terminalButton}
+                {fileManagerButton}
+                {uploadButton}
+                {refreshButton}
+                {ignoredFilesButton("sidebar-files-views-start")}
+                {changesButton}
+              </div>
+            )}
+          </div>
+
+          {explorerCwd && fileManagerErrorMessage && (
+            <div role="alert" className="sidebar-files-error">
+              <span className="sidebar-files-error-text">{fileManagerErrorMessage}</span>
+              <DismissButton onClick={() => setFileManagerError(null)} title={t("files.dismissError")} />
+            </div>
+          )}
+          {/* Mounted whenever there is a cwd, also while the tab or the folded
+              section hides it, so the expanded tree, a search and an upload in
+              progress survive a switch. */}
+          <div ref={explorerScrollRef} className="sidebar-files-scroll scrollbar-subtle">
+            {explorerCwd && (
               <FileExplorer
                 ref={fileExplorerRef}
-                cwd={selectedCwd ?? selectedCwdProp!}
+                cwd={explorerCwd}
                 onOpenFile={onOpenFile ?? (() => {})}
                 refreshKey={explorerKey}
                 onAtMention={onAtMention}
@@ -1996,472 +3434,29 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 onChangesCountChange={setChangesCount}
                 fileSearchOpen={fileSearchOpen}
                 onFileSearchOpenChange={setFileSearchOpen}
+                showHidden={showIgnoredFiles}
               />
-            </div>
-          )}
+            )}
+          </div>
         </div>
-      )}
-    </div>
-  );
-}
+      </div>
 
-function RunningSessionIndicator() {
-  const { t } = useI18n();
-  return (
-    <span
-      title={t("sidebar.agentRunning")}
-      aria-label={t("sidebar.agentRunning")}
-      style={{
-        width: 14,
-        height: 14,
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        flexShrink: 0,
-        color: "var(--accent)",
-      }}
-    >
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true" style={{ display: "block" }}>
-        <g>
-          <path
-            d="M21 12a9 9 0 1 1-3.8-7.4"
-            stroke="currentColor"
-            strokeWidth="2.8"
-            strokeLinecap="round"
-          />
-          <animateTransform
-            attributeName="transform"
-            type="rotate"
-            from="0 12 12"
-            to="360 12 12"
-            dur="0.9s"
-            repeatCount="indefinite"
-          />
-        </g>
-      </svg>
-    </span>
-  );
-}
-
-function UnreadSessionIndicator() {
-  const { t } = useI18n();
-  return (
-    <span
-      title={t("sidebar.newActivity")}
-      aria-label={t("sidebar.newSessionActivity")}
-      style={{
-        width: 14,
-        height: 14,
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        flexShrink: 0,
-        color: "#0891b2",
-      }}
-    >
-      <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true" style={{ display: "block" }}>
-        <circle cx="7" cy="7" r="2.5" fill="currentColor" />
-        <circle cx="7" cy="7" r="3" stroke="currentColor" strokeWidth="1.4" opacity="0.32">
-          <animate attributeName="r" values="3;6;3" dur="1.6s" repeatCount="indefinite" />
-          <animate attributeName="opacity" values="0.32;0;0.32" dur="1.6s" repeatCount="indefinite" />
-        </circle>
-      </svg>
-    </span>
-  );
-}
-
-/**
- * Compact per-project activity badges for the workspace selector dropdown items:
- * a spinning running icon + count and an unread dot + count. Renders nothing
- * when the project has no activity. Counts share the accent / unread colors of
- * the per-session indicators so the two stay visually consistent.
- */
-function showProjectActivity(
-  activity: { running: number; unread: number } | undefined,
-  t: (key: string) => string,
-): ReactNode {
-  if (!activity || (activity.running === 0 && activity.unread === 0)) return null;
-  return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 5, flexShrink: 0, marginLeft: 6 }}>
-      {activity.running > 0 && (
-        <span
-          title={t("sidebar.agentRunning")}
-          aria-label={`${t("sidebar.agentRunning")} (${activity.running})`}
-          style={{ display: "inline-flex", alignItems: "center", gap: 3, color: "var(--accent)", fontSize: 10, fontFamily: "var(--font-mono)" }}
-        >
-          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" aria-hidden="true" style={{ display: "block" }}>
-            <g>
-              <path d="M21 12a9 9 0 1 1-3.8-7.4" stroke="currentColor" strokeWidth="2.8" strokeLinecap="round" />
-              <animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="0.9s" repeatCount="indefinite" />
-            </g>
-          </svg>
-          {activity.running}
-        </span>
-      )}
-      {activity.unread > 0 && (
-        <span
-          title={t("sidebar.newSessionActivity")}
-          aria-label={`${t("sidebar.newSessionActivity")} (${activity.unread})`}
-          style={{ display: "inline-flex", alignItems: "center", gap: 3, color: "#0891b2", fontSize: 10, fontFamily: "var(--font-mono)" }}
-        >
-          <span style={{ width: 6, height: 6, borderRadius: "50%", background: "currentColor", display: "inline-block" }} />
-          {activity.unread}
-        </span>
-      )}
-    </span>
-  );
-}
-
-function SessionItem({
-  session,
-  isSelected,
-  isRunning,
-  isUnread,
-  onClick,
-  onRenamed,
-  onDeleted,
-  depth = 0,
-  hasChildren = false,
-  collapsed = false,
-  onToggleCollapse,
-}: {
-  session: SessionInfo;
-  isSelected: boolean;
-  isRunning?: boolean;
-  isUnread?: boolean;
-  onClick: () => void;
-  onRenamed?: () => void;
-  onDeleted?: (id: string) => void;
-  depth?: number;
-  hasChildren?: boolean;
-  collapsed?: boolean;
-  onToggleCollapse?: () => void;
-}) {
-  const { locale, t } = useI18n();
-  const [hovered, setHovered] = useState(false);
-  const [renaming, setRenaming] = useState(false);
-  const [renameValue, setRenameValue] = useState("");
-  const [confirmDelete, setConfirmDelete] = useState(false);
-  const [deleting, setDeleting] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  // Select the whole name once the rename input is mounted (startRename's
-  // immediate setTimeout can fire before the input exists).
-  useEffect(() => {
-    if (renaming) {
-      const id = requestAnimationFrame(() => inputRef.current?.select());
-      return () => cancelAnimationFrame(id);
-    }
-  }, [renaming]);
-
-  // A stored first message may be an SDK-expanded <skill> block; collapse it
-  // back to the compact /skill:name args command the user typed before using
-  // it as the auto-name fallback, mirroring MessageView's rendering.
-  const displayFirstMessage = skillExpansionToCommand(session.firstMessage) ?? session.firstMessage;
-  const title = session.name || displayFirstMessage.slice(0, 50) || session.id.slice(0, 12);
-
-  const startRename = useCallback((e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (session.transient) return;
-    setRenameValue(session.name || displayFirstMessage.slice(0, 50) || session.id.slice(0, 12));
-    setRenaming(true);
-  }, [session.name, session.transient, displayFirstMessage, session.id]);
-
-  const commitRename = useCallback(async () => {
-    const name = renameValue.trim();
-    setRenaming(false);
-    // No-op when unchanged: the fallback title (first message / id) isn't a
-    // real stored name, so don't persist it as one. (The rename input seeds
-    // from the same collapsed displayFirstMessage, so an untouched rename of
-    // a skill-invoked session stays a no-op instead of persisting raw XML.)
-    if (renameValue === title || name === (session.name ?? "")) return;
-    try {
-      await fetch(`/api/sessions/${encodeURIComponent(session.id)}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name }),
-      });
-      onRenamed?.();
-    } catch {
-      // ignore
-    }
-  }, [renameValue, session.id, session.name, onRenamed, title]);
-
-  const performDelete = useCallback(async () => {
-    if (session.transient) return;
-    setConfirmDelete(false);
-    setDeleting(true);
-    try {
-      await fetch(`/api/sessions/${encodeURIComponent(session.id)}`, { method: "DELETE" });
-      onDeleted?.(session.id);
-    } catch {
-      setDeleting(false);
-    }
-  }, [session.id, session.transient, onDeleted]);
-
-  const handleDeleteClick = useCallback((e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (e.shiftKey) {
-      void performDelete();
-    } else {
-      setConfirmDelete(true);
-    }
-  }, [performDelete]);
-
-  const handleDeleteConfirm = useCallback((e: React.MouseEvent) => {
-    e.stopPropagation();
-    void performDelete();
-  }, [performDelete]);
-
-  const handleDeleteCancel = useCallback((e: React.MouseEvent) => {
-    e.stopPropagation();
-    setConfirmDelete(false);
-  }, []);
-
-  const handleContextMenu = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    const handled = dispatchSessionRowContextMenu({
-      id: session.id,
-      path: session.path,
-      cwd: session.cwd,
-      name: session.name,
-      clientX: e.clientX,
-      clientY: e.clientY,
-      refresh: () => { onRenamed?.(); },
-    });
-    if (!handled) return;
-    e.preventDefault();
-    e.stopPropagation();
-  }, [onRenamed, session.cwd, session.id, session.name, session.path]);
-
-  // Fixed-height outer wrapper — content swaps in place so the list never reflows
-  return (
-    <div
-      onClick={confirmDelete || renaming ? undefined : onClick}
-      onContextMenu={confirmDelete || renaming ? undefined : handleContextMenu}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => { setHovered(false); }}
-      style={{
-        height: SESSION_LIST_ITEM_HEIGHT,
-        display: "flex",
-        alignItems: "center",
-        paddingLeft: depth > 0 ? depth * 12 + 14 : 14,
-        paddingRight: 8,
-        cursor: confirmDelete || renaming ? "default" : "pointer",
-        background: confirmDelete
-          ? "rgba(239,68,68,0.06)"
-          : isSelected ? "var(--bg-selected)" : hovered ? "var(--bg-hover)" : "transparent",
-        borderLeft: confirmDelete
-          ? "2px solid #ef4444"
-          : isSelected ? "2px solid var(--accent)" : "2px solid transparent",
-        transition: "background 0.1s",
-        opacity: deleting ? 0.5 : 1,
-        gap: 6,
-        overflow: "hidden",
-      }}
-    >
-      {confirmDelete ? (
-        /* ── Delete confirmation: same height, two flat buttons ── */
-        <>
-          <div style={{ flex: 1, minWidth: 0, fontSize: 12, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {t("sidebar.deleteSession", { title: title.slice(0, 22) + (title.length > 22 ? "…" : "") })}
-          </div>
-          <div style={{ display: "flex", gap: 5, flexShrink: 0 }}>
-            <button
-              onClick={handleDeleteConfirm}
-              style={{
-                display: "flex", alignItems: "center", justifyContent: "center", gap: 4,
-                height: 30, padding: "0 11px",
-                background: "#ef4444", border: "none",
-                borderRadius: 6, color: "#fff",
-                cursor: "pointer", fontSize: 12, fontWeight: 600,
-                whiteSpace: "nowrap",
-              }}
-            >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <polyline points="3 6 5 6 21 6" />
-                <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
-                <path d="M10 11v6M14 11v6" />
-                <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
-              </svg>
-              {t("sidebar.delete")}
-            </button>
-            <button
-              onClick={handleDeleteCancel}
-              style={{
-                display: "flex", alignItems: "center", justifyContent: "center",
-                height: 30, padding: "0 11px",
-                background: "var(--bg)", border: "1px solid var(--border)",
-                borderRadius: 6, color: "var(--text-muted)",
-                cursor: "pointer", fontSize: 12, fontWeight: 500,
-                whiteSpace: "nowrap",
-              }}
-            >
-              {t("sidebar.cancel")}
-            </button>
-          </div>
-        </>
-      ) : renaming ? (
-        /* ── Rename: input fills the same row ── */
-        <input
-          ref={inputRef}
-          value={renameValue}
-          onChange={(e) => setRenameValue(e.target.value)}
-          onBlur={commitRename}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") commitRename();
-            if (e.key === "Escape") setRenaming(false);
-          }}
-          autoFocus
-          style={{
-            flex: 1,
-            fontSize: 12,
-            padding: "5px 8px",
-            border: "1px solid var(--accent)",
-            borderRadius: 5,
-            outline: "none",
-            background: "var(--bg)",
-            color: "var(--text)",
-            height: 30,
-          }}
-        />
-      ) : (
-        /* ── Normal view ── */
-        <>
-          {/* Subagent indicator for child sessions */}
-          {depth > 0 && (
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-              <rect x="5" y="7" width="14" height="11" rx="2" />
-              <path d="M9 11h.01M15 11h.01M9 15h6M12 7V4M10 4h4" />
-            </svg>
-          )}
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 5,
-                minWidth: 0,
-                fontSize: 12,
-                fontWeight: isSelected ? 500 : 400,
-                lineHeight: 1.4,
-                color: "var(--text)",
-              }}
-              title={title}
-            >
-              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
-                {title}
-              </span>
-            </div>
-            <div style={{ marginTop: 2, display: "flex", alignItems: "center", gap: 8, color: "var(--text-dim)", fontSize: 11, minWidth: 0 }}>
-              {isRunning ? (
-                <RunningSessionIndicator />
-              ) : isUnread ? (
-                <UnreadSessionIndicator />
-              ) : (
-                <span title={session.modified}>{formatRelativeTime(session.modified, locale)}</span>
-              )}
-              <span>
-                {session.detailsPending ? "…" : t("sidebar.messagesCount", { count: session.messageCount })}
-              </span>
-              {session.isWorktree && session.branch && (
-                <span
-                  title={`Worktree: ${session.cwd}`}
-                  style={{ display: "flex", alignItems: "center", gap: 3, color: "var(--accent)", minWidth: 0, overflow: "hidden" }}
-                >
-                  <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-                    <line x1="6" y1="3" x2="6" y2="15" />
-                    <circle cx="18" cy="6" r="3" />
-                    <circle cx="6" cy="18" r="3" />
-                    <path d="M18 9a9 9 0 0 1-9 9" />
-                  </svg>
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{session.branch}</span>
-                </span>
-              )}
-            </div>
-          </div>
-
-          {/* Collapse toggle — always visible when has children */}
-          {hasChildren && (
-            <button
-              onClick={(e) => { e.stopPropagation(); onToggleCollapse?.(); }}
-              title={t(collapsed ? "sidebar.expandSubagents" : "sidebar.collapseSubagents")}
-              style={{
-                display: "flex", alignItems: "center", justifyContent: "center",
-                width: 20, height: 20, padding: 0, flexShrink: 0,
-                background: "none", border: "none",
-                color: "var(--text-dim)", cursor: "pointer",
-                transform: collapsed ? "rotate(-90deg)" : "none",
-                transition: "transform 0.15s",
-              }}
-            >
-              <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                <polyline points="2 3.5 5 6.5 8 3.5" />
-              </svg>
-            </button>
-          )}
-
-          {/* Action buttons — shown on hover */}
-          {hovered && !session.transient && (
-            <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
-              <button
-                onClick={startRename}
-                title={t("sidebar.rename")}
-                style={{
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                  width: 32, height: 32, padding: 0,
-                  background: "var(--bg-hover)", border: "1px solid var(--border)",
-                  borderRadius: 7, color: "var(--text-muted)",
-                  cursor: "pointer", flexShrink: 0,
-                  transition: "background 0.12s, color 0.12s, border-color 0.12s",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = "var(--bg-selected)";
-                  e.currentTarget.style.color = "var(--accent)";
-                  e.currentTarget.style.borderColor = "rgba(37,99,235,0.35)";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = "var(--bg-hover)";
-                  e.currentTarget.style.color = "var(--text-muted)";
-                  e.currentTarget.style.borderColor = "var(--border)";
-                }}
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
-                </svg>
-              </button>
-              <button
-                onClick={handleDeleteClick}
-                title={t("sidebar.deleteWithShiftClick")}
-                style={{
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                  width: 32, height: 32, padding: 0,
-                  background: "var(--bg-hover)", border: "1px solid var(--border)",
-                  borderRadius: 7, color: "var(--text-muted)",
-                  cursor: "pointer", flexShrink: 0,
-                  transition: "background 0.12s, color 0.12s, border-color 0.12s",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = "rgba(239,68,68,0.08)";
-                  e.currentTarget.style.color = "#ef4444";
-                  e.currentTarget.style.borderColor = "rgba(239,68,68,0.35)";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = "var(--bg-hover)";
-                  e.currentTarget.style.color = "var(--text-muted)";
-                  e.currentTarget.style.borderColor = "var(--border)";
-                }}
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <polyline points="3 6 5 6 21 6" />
-                  <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
-                  <path d="M10 11v6M14 11v6" />
-                  <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
-                </svg>
-              </button>
-            </div>
-          )}
-        </>
-      )}
+      <SidebarMenu
+        open={menu !== null}
+        anchor={menu?.anchor ?? null}
+        sheet={isMobile}
+        ariaLabel={menuLabel}
+        title={menuTitle}
+        items={menuItems}
+        cancelLabel={t("sidebar.cancel")}
+        focusCancel={menuBody !== null}
+        onClose={closeMenu}
+        returnFocusTo={menu?.opener ?? null}
+        width={menuWidth}
+      >
+        {menuBody}
+      </SidebarMenu>
+      <SidebarToast toast={toast} onDismiss={() => setToast(null)} dismissLabel={t("sidebar.dismiss")} />
     </div>
   );
 }

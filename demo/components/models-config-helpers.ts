@@ -54,6 +54,19 @@ export function setCompatBool<T extends CompatEntry>(entry: T, key: string, valu
   };
 }
 
+/**
+ * Sets a compat flag whose default is off. The entry keeps the key only while
+ * it differs from what the entry inherits (the provider's value, else off), so
+ * switching it back leaves no override behind.
+ */
+export function setCompatFlag<T extends CompatEntry>(entry: T, key: string, value: boolean, inherited = false): T {
+  if (value !== inherited) return setCompatBool(entry, key, value);
+  if (!entry.compat || !Object.prototype.hasOwnProperty.call(entry.compat, key)) return entry;
+  const rest = { ...entry.compat };
+  delete rest[key];
+  return { ...entry, compat: Object.keys(rest).length ? rest : undefined };
+}
+
 export function updateHeaderRow(
   rows: readonly HeaderRow[],
   id: number,
@@ -117,4 +130,100 @@ export function collectModelRenames(
     });
   }
   return renames;
+}
+
+/** What the panel remembers between saves to tell renames from edits. */
+export interface ProviderRenameTracking {
+  /** Provider ids as models.json has them on disk. */
+  savedProviders: Set<string>;
+  /** Saved provider id -> where renames since the last save moved it. */
+  renames: Map<string, string>;
+  /** Saved model ids per provider, keyed by the provider's current id. */
+  slots: Map<string, (string | null)[]>;
+}
+
+/**
+ * Saved provider id that the current draft provider `name` came from, or null
+ * when `name` was added since the last save.
+ *
+ * Once a saved id `from` is in `renames` (`from -> to`), that saved provider
+ * lives at `to`, not at `from`: a provider later given the freed id `from` is
+ * not the original `from`.
+ */
+function savedProviderOf(
+  { renames, savedProviders }: Pick<ProviderRenameTracking, "renames" | "savedProviders">,
+  name: string,
+): string | null {
+  for (const [from, to] of renames) {
+    if (to === name) return from;
+  }
+  return !renames.has(name) && savedProviders.has(name) ? name : null;
+}
+
+/**
+ * Moves a provider to a new id, keeping its place in models.json, and records
+ * the move so the enabledModels entries can follow it on save.
+ *
+ * Returns null and records nothing when the provider is gone or the new id is
+ * already taken: models.json is keyed by id, so the move would silently
+ * replace the other provider.
+ */
+export function renameProviderEntry<T extends ModelsConfigDraft>(
+  config: T,
+  tracking: ProviderRenameTracking,
+  oldName: string,
+  newName: string,
+): T | null {
+  const providers = config.providers ?? {};
+  if (!Object.hasOwn(providers, oldName)) return null;
+  if (oldName === newName) return config;
+  if (Object.hasOwn(providers, newName)) return null;
+
+  const { renames, slots } = tracking;
+  const original = savedProviderOf(tracking, oldName);
+  if (original === newName) renames.delete(original);
+  else if (original !== null) renames.set(original, newName);
+  const saved = slots.get(oldName);
+  if (saved) {
+    slots.delete(oldName);
+    slots.set(newName, saved);
+  }
+
+  const entries = Object.entries(providers);
+  const index = entries.findIndex(([name]) => name === oldName);
+  entries[index] = [newName, entries[index][1]];
+  return { ...config, providers: Object.fromEntries(entries) };
+}
+
+/**
+ * Removes a provider from `config` and forgets any unsaved rename or model-slot
+ * tracking for it, so saving after a rename-then-delete does not rewrite
+ * `enabledModels` to the deleted id or mistake a new provider with the old id
+ * for the deleted one.
+ */
+export function deleteProviderEntry<T extends ModelsConfigDraft>(
+  config: T,
+  tracking: ProviderRenameTracking,
+  name: string,
+): T {
+  const original = savedProviderOf(tracking, name);
+  if (original !== null) {
+    tracking.renames.delete(original);
+    tracking.savedProviders.delete(original);
+  }
+  tracking.slots.delete(name);
+  const providers = { ...(config.providers ?? {}) };
+  delete providers[name];
+  return { ...config, providers };
+}
+
+/** Add provider's search: a provider matches by its id or its shown name, case-insensitive. */
+export function providerMatchesSearch(search: string, id: string, label: string): boolean {
+  const query = search.trim().toLowerCase();
+  return !query || label.toLowerCase().includes(query) || id.toLowerCase().includes(query);
+}
+
+/** Models sidebar: a model shows its models.json name, as the selector does; the id when it has none. */
+export function modelSidebarLabel(model: { id: string; name?: string }): string {
+  return model.name?.trim() || model.id;
 }

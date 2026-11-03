@@ -1,6 +1,7 @@
 "use client";
 
 import { memo, useEffect, useRef, useState, useCallback, useMemo, type RefObject } from "react";
+import { createPortal } from "react-dom";
 import ReactMarkdown, { type Options as ReactMarkdownOptions } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import {
@@ -15,17 +16,24 @@ import styles from "./ChatMinimap.module.css";
 
 interface Props {
   messages: AgentMessage[];
-  streamingMessage: Partial<AgentMessage> | null;
+  /** The reply being streamed, read when the turns are measured: it never re-renders the minimap. */
+  getStreamingMessage: () => Partial<AgentMessage> | null;
   scrollContainer: RefObject<HTMLDivElement | null>;
   messageRefs: RefObject<(HTMLDivElement | null)[]>;
   onRevealHistory: () => void;
+  /** Turns of the branch the server has not sent yet: numbers continue from it (#791). */
+  turnsBefore: number;
+  /** 轨道画进的图层：ChatWindow 铺在聊天区右缘、从窗口顶到窗口底、盖在输入栏之上的一条 36px 槽。
+   *  轨道（连同悬停预览和小锁）画在槽里，所以一路延伸到底，预览也浮在输入栏上方；
+   *  消息行里原来的位置只留一块等宽的占位，列表宽度不变。槽还没挂上时不画轨道。 */
+  railSlot?: HTMLElement | null;
 }
 
 const MINIMAP_WIDTH = 36;
 const MAX_NODE_GAP = 50;
 const MINIMAP_PADDING = 12;
-// The lock button sits at the bottom of the rail (6px inset + 30px): nodes stop
-// above it so the last turn stays visible and clickable.
+// The lock button sits at the bottom of the rail (3px inset + 30px, rounded up to
+// 36px): nodes stop above it so the last turn stays visible and clickable.
 const MINIMAP_BOTTOM_PADDING = 36 + MINIMAP_PADDING;
 const PREVIEW_HIDE_DELAY = 250;
 const NAVIGATION_ACTIVE_LOCK_MS = 1600;
@@ -243,12 +251,14 @@ function layoutNodes(allNodes: NodeInfo[], minimapHeight: number): NodeLayout {
   };
 }
 
-export function ChatMinimap({
+export const ChatMinimap = memo(function ChatMinimap({
   messages,
-  streamingMessage,
+  getStreamingMessage,
   scrollContainer,
   messageRefs,
   onRevealHistory,
+  turnsBefore,
+  railSlot,
 }: Props) {
   const { t } = useI18n();
   const [visible, setVisible] = useState(false);
@@ -277,12 +287,8 @@ export function ChatMinimap({
     headingIndex?: number;
   } | null>(null);
 
-  const allMessages = useMemo(
-    () => (streamingMessage ? [...messages, streamingMessage] : messages) as (AgentMessage | Partial<AgentMessage>)[],
-    [messages, streamingMessage],
-  );
-  const allMessagesRef = useRef(allMessages);
-  allMessagesRef.current = allMessages;
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
 
   const nodeLayout = useMemo(
     () => layoutNodes(allNodes, minimapHeight),
@@ -346,7 +352,11 @@ export function ChatMinimap({
       let refIndex = 0;
       let currentTurn: TurnInfo | null = null;
 
-      for (const message of allMessagesRef.current) {
+      const streamingMessage = getStreamingMessage();
+      const allMessages: (AgentMessage | Partial<AgentMessage>)[] = streamingMessage
+        ? [...messagesRef.current, streamingMessage]
+        : messagesRef.current;
+      for (const message of allMessages) {
         const isAnchor = isMessageGroupAnchor(message);
         if (!isAnchor && message.role !== "assistant") continue;
         const element = refs?.[refIndex];
@@ -419,7 +429,7 @@ export function ChatMinimap({
         scrollEl.scrollTo({ top: Math.max(0, targetTop - targetOffset), behavior: "smooth" });
       }
     }, 150);
-  }, [lockActiveNode, messageRefs, scrollContainer, syncActiveNode]);
+  }, [getStreamingMessage, lockActiveNode, messageRefs, scrollContainer, syncActiveNode]);
 
   useEffect(() => {
     const el = scrollContainer.current;
@@ -625,14 +635,14 @@ export function ChatMinimap({
     previewBox.scrollTop = Math.max(0, targetTop);
   }, [allNodes, minimapHovered, nearestNodeIndex]);
 
-  if (!visible) return null;
+  if (!visible || !railSlot) return null;
 
   const lastNodeTop = positionedNodes.length > 0
     ? positionedNodes[positionedNodes.length - 1].topRatio * minimapHeight
     : MINIMAP_PADDING;
   const railHeight = Math.max(1, lastNodeTop - MINIMAP_PADDING);
 
-  return (
+  const rail = (
     <div
       ref={containerRef}
       onMouseDown={handleMouseDown}
@@ -653,6 +663,21 @@ export function ChatMinimap({
         overflow: "visible",
       }}
     >
+      {turnsBefore > 0 && (
+        <div
+          data-minimap-earlier=""
+          style={{
+            position: "absolute",
+            left: "50%",
+            top: 0,
+            height: MINIMAP_PADDING,
+            width: 1,
+            background: "repeating-linear-gradient(to bottom, var(--text-dim) 0 2px, transparent 2px 4px)",
+            transform: "translateX(-50%)",
+            zIndex: 0,
+          }}
+        />
+      )}
       <div
         style={{
           position: "absolute",
@@ -747,6 +772,17 @@ export function ChatMinimap({
           onMouseDown={(event) => event.stopPropagation()}
           onMouseMove={(event) => event.stopPropagation()}
         >
+          {turnsBefore > 0 && (
+            <button
+              type="button"
+              className={styles.earlier}
+              data-minimap-preview-earlier=""
+              // The chat's top sentinel pages the older history in.
+              onClick={() => scrollContainer.current?.scrollTo({ top: 0, behavior: "smooth" })}
+            >
+              {t("chatMinimap.earlierTurns", { count: turnsBefore })}
+            </button>
+          )}
           {allNodes.map((node) => {
             const isLocated = nearestNodeIndex === node.index;
             return (
@@ -762,7 +798,7 @@ export function ChatMinimap({
               >
                 <span className={styles.number}>
                   <span aria-hidden="true">
-                    {String(node.index + 1).padStart(2, "0")}
+                    {String(turnsBefore + node.index + 1).padStart(2, "0")}
                   </span>
                   {node.targetTurn.toolCount > 0 && (
                     <span
@@ -821,7 +857,17 @@ export function ChatMinimap({
       )}
     </div>
   );
-}
+
+  // 轨道本体画进 ChatWindow 铺在聊天区右缘的整高图层：消息行到输入栏上沿就结束，轨道留在行里
+  // 就只能到那儿，小锁和预览都悬在输入栏上方。图层从窗口顶到窗口底、盖在输入栏之上，轨道、
+  // 预览面板、小锁都是它的子元素，自然一路到底。行里留一块等宽的占位，消息列表的宽度不变。
+  return (
+    <>
+      <div aria-hidden="true" style={{ width: MINIMAP_WIDTH, flexShrink: 0 }} />
+      {createPortal(rail, railSlot)}
+    </>
+  );
+});
 
 // Hook to create a stable array of refs for messages
 export function useMessageRefs(count: number): RefObject<(HTMLDivElement | null)[]> {

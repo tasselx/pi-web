@@ -149,9 +149,9 @@ export async function exportSessionContent(
   mkdirSync(tempDir, { recursive: true });
   const outputPath = join(tempDir, `${randomUUID()}.html`);
   try {
-    const patchedHtml = await exportSessionHtmlToFile(filePath, outputPath);
+    const html = await exportSessionHtmlToFile(filePath, outputPath);
     return {
-      content: patchedHtml,
+      content: html,
       contentType: "text/html; charset=utf-8",
       fileName: `pi-session-${sessionBase}.html`,
     };

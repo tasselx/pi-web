@@ -8,8 +8,16 @@ import { SelectorRow } from "./SelectorRow";
 
 export interface ModelSelectorOption {
   provider: string;
+  /** The provider's display name; falls back to `provider` in the group heading. */
+  providerName?: string;
   modelId: string;
   name: string;
+}
+
+export interface ModelSelectorGroup {
+  provider: string;
+  providerName: string;
+  options: ModelSelectorOption[];
 }
 
 interface ModelSelectorProps {
@@ -46,10 +54,31 @@ export function filterModelOptions(options: ModelSelectorOption[], query: string
   if (!normalizedQuery) return options;
 
   return options.filter((option) => (
-    `${option.name} ${option.modelId} ${option.provider}/${option.modelId}`
+    `${option.name} ${option.providerName ?? ""} ${option.modelId} ${option.provider}/${option.modelId}`
       .toLocaleLowerCase()
       .includes(normalizedQuery)
   ));
+}
+
+/** Groups in first-appearance order; never re-sorts, so a models.json provider keeps its file's order (#783). */
+export function groupModelOptions(options: ModelSelectorOption[]): ModelSelectorGroup[] {
+  const groups: ModelSelectorGroup[] = [];
+  for (const option of options) {
+    const existing = groups.find((group) => group.provider === option.provider);
+    if (existing) {
+      existing.options.push(option);
+      if (existing.providerName === existing.provider && option.providerName?.trim()) {
+        existing.providerName = option.providerName.trim();
+      }
+    } else {
+      groups.push({
+        provider: option.provider,
+        providerName: option.providerName?.trim() || option.provider,
+        options: [option],
+      });
+    }
+  }
+  return groups;
 }
 
 export function ModelSelector({
@@ -94,13 +123,7 @@ export function ModelSelector({
     if (!showAll) onShowAll?.();
     setShowAll(!showAll);
   };
-  const modelsByProvider: { provider: string; options: ModelSelectorOption[] }[] = [];
-
-  for (const option of filteredOptions) {
-    const group = modelsByProvider.find((item) => item.provider === option.provider);
-    if (group) group.options.push(option);
-    else modelsByProvider.push({ provider: option.provider, options: [option] });
-  }
+  const modelsByProvider = groupModelOptions(filteredOptions);
   // “最近使用”只在没输入筛选词时列出：筛选是在全部模型里找，最近那几行只会碍事。
   const recentRows = onSelectRecent && !filter.trim()
     ? (recent ?? []).map((entry) => ({
@@ -419,8 +442,15 @@ export function ModelSelector({
                 <div key={group.provider}>
                   {/* 最近使用的分组占了列表顶部，其下的模型要有自己的标题，哪怕只有一个 provider。 */}
                   {(modelsByProvider.length > 1 || recentRows.length > 0) && (
-                    <div style={groupHeaderStyle(index > 0 || Boolean(onClear) || recentRows.length > 0)}>
-                      {group.provider}
+                    <div
+                      title={group.providerName === group.provider ? undefined : group.provider}
+                      style={{
+                        ...groupHeaderStyle(index > 0 || Boolean(onClear) || recentRows.length > 0),
+                        // provider 有显示名时原样展示，只有回退成 id 才全大写（上游 #1514）。
+                        textTransform: group.providerName === group.provider ? "uppercase" : "none",
+                      }}
+                    >
+                      {group.providerName}
                     </div>
                   )}
                   {group.options.map((option) => {

@@ -14,6 +14,14 @@ export const ENABLED_MODELS_RESPONSE = enabledModelsResponse;
 export const AUTH_PROVIDERS_RESPONSE = authProvidersResponse;
 export const MODELS_CONFIG = modelsConfigResponse as { providers: Record<string, Record<string, unknown>> };
 
+/**
+ * 各 provider 的运行时显示名，取自录制的 enabled-models 视图（真实服务端用同一来源给 GET /api/models 的
+ * 每一行加 providerName，选择器的分组标题据此显示名字而不是 id）。
+ */
+export const PROVIDER_NAMES: Record<string, string> = Object.fromEntries(
+  ENABLED_MODELS_RESPONSE.providers.map((provider) => [provider.id, provider.name]),
+);
+
 /** Wire API each provider speaks (recorded on assistant messages). */
 export const MODEL_API: Record<string, string> = {
   "openai-codex": "openai-codex-responses",

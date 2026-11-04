@@ -17,7 +17,7 @@ import subagentProfilesResponse from "./captured/subagent-profiles.json";
 import type { MockRequest } from "./http";
 import { delay, error, json } from "./http";
 import { currentDemoLocale, pick } from "./locale";
-import { AUTH_PROVIDERS_RESPONSE, ENABLED_MODELS_RESPONSE, MODELS_CONFIG, MODELS_RESPONSE, MODEL_PRICING } from "./data/models";
+import { AUTH_PROVIDERS_RESPONSE, ENABLED_MODELS_RESPONSE, MODELS_CONFIG, MODELS_RESPONSE, MODEL_PRICING, PROVIDER_NAMES } from "./data/models";
 import { PLUGINS_RESPONSE, SKILL_DOCUMENTS, SKILL_SEARCH_RESULTS } from "./data/extensions";
 import { CODEMODE_INLINE_BUDGET_MAX, settings } from "./settings-state";
 import { demoOnlyMessage } from "./unavailable";
@@ -63,7 +63,10 @@ function recomputeEnabledView(): EnabledView {
 /** GET /api/models for the chat model picker, honouring the switches. */
 export function visibleModels() {
   const enabled = new Set(recomputeEnabledView().providers.flatMap((provider) => provider.models.filter((model) => model.enabled).map((model) => model.ref)));
-  const modelList = MODELS_RESPONSE.modelList.filter((model) => enabled.has(`${model.provider}/${model.id}`));
+  // 与真实接口一致：每行带上 provider 显示名（上游 #1514），录制的原始数据里没有这个字段。
+  const modelList = MODELS_RESPONSE.modelList
+    .filter((model) => enabled.has(`${model.provider}/${model.id}`))
+    .map((model) => ({ ...model, providerName: PROVIDER_NAMES[model.provider] ?? model.provider }));
   return {
     ...MODELS_RESPONSE,
     modelList,

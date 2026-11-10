@@ -32,7 +32,15 @@ const SDK_MODULES = {
   configValues: "dist/core/resolve-config-value.js",
 } as const;
 
-type SdkModuleName = keyof typeof SDK_MODULES | "mcpClient";
+// pi-mcp is a dependency of the SDK, not of pi-web, so its modules are
+// resolved from the SDK file that imports them. pi 1.5.1 moved
+// McpSignInCancelledError from the SDK's oauth.js to pi-mcp's oauth entry.
+const MCP_SUBPATHS = {
+  mcpClient: ".",
+  mcpOAuthApi: "./oauth",
+} as const;
+
+type SdkModuleName = keyof typeof SDK_MODULES | keyof typeof MCP_SUBPATHS;
 type MemberKind = "class" | "function";
 
 const MEMBERS = {
@@ -47,7 +55,7 @@ const MEMBERS = {
   getMcpToolExposure: { module: "mcpServers", kind: "function" },
   signInMcpServer: { module: "mcpOAuth", kind: "function" },
   McpOAuthCredentialStore: { module: "mcpOAuth", kind: "class" },
-  McpSignInCancelledError: { module: "mcpOAuth", kind: "class" },
+  McpSignInCancelledError: { module: "mcpOAuthApi", kind: "class" },
   resolveConfigValueOrThrow: { module: "configValues", kind: "function" },
   resolveHeadersOrThrow: { module: "configValues", kind: "function" },
   getConfigValueEnvVarNames: { module: "configValues", kind: "function" },
@@ -63,8 +71,8 @@ export type McpOAuthCredentialStore = NonNullable<McpExtensionOptions["credentia
 /** One server's slice of the credential store. */
 export type McpOAuthServerStore = ReturnType<McpOAuthCredentialStore["forServer"]>;
 
-/** pi-mcp's `McpOAuthStateStore`, which sign-in reads and writes. */
-export type McpOAuthStateStore = Pick<McpOAuthServerStore, "load" | "save">;
+/** pi-mcp's `McpOAuthServerStore`, which sign-in reads, writes and refreshes under (pi 1.5.1 requires the lock). */
+export type McpOAuthStateStore = Pick<McpOAuthServerStore, "load" | "save" | "withRefreshLock">;
 
 /** pi-mcp's `StdioTransportOptions`. */
 export interface StdioTransportOptions {
@@ -288,17 +296,24 @@ function packageImportEntry(manifest: unknown): string | undefined {
   return conditionalTarget(isRecord(exports) && "." in exports ? exports["."] : exports) ?? undefined;
 }
 
+/** The ESM entry a package's `exports` gives for an `import` of `subpath`. */
+function packageSubpathImportEntry(manifest: unknown, subpath: string): string | undefined {
+  if (!isRecord(manifest) || !isRecord(manifest.exports)) return undefined;
+  return conditionalTarget(manifest.exports[subpath]) ?? undefined;
+}
+
 /**
  * pi-mcp is a dependency of the SDK, not of pi-web, so it is resolved from the
  * SDK file that imports it: the copy runtime.js uses, whether npm nested it
- * under the SDK or hoisted it.
+ * under the SDK or hoisted it. `subpath` is an `exports` key of pi-mcp.
  */
-function resolveMcpClientEntry(packageDir: string): string {
+function resolveMcpEntry(packageDir: string, subpath: string): string {
   const importer = pathToFileURL(join(packageDir, SDK_MODULES.mcpRuntime)).href;
   const manifestPath = findPackageJSON(MCP_PACKAGE, importer);
   if (!manifestPath) throw new Error(`cannot resolve ${MCP_PACKAGE}`);
-  const entry = packageImportEntry(JSON.parse(readFileSync(manifestPath, "utf8")));
-  if (!entry) throw new Error(`${manifestPath} declares no import entry`);
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  const entry = subpath === "." ? packageImportEntry(manifest) : packageSubpathImportEntry(manifest, subpath);
+  if (!entry) throw new Error(`${manifestPath} declares no import entry for ${subpath}`);
   return join(manifestPath, "..", entry);
 }
 
@@ -314,10 +329,12 @@ async function importSdkModules(packageDir: string): Promise<LoadedModules | str
   const paths = Object.fromEntries(
     Object.entries(SDK_MODULES).map(([name, path]) => [name, join(packageDir, path)]),
   ) as Record<SdkModuleName, string>;
-  try {
-    paths.mcpClient = resolveMcpClientEntry(packageDir);
-  } catch (error) {
-    return `${MCP_PACKAGE}: ${errorMessage(error)}`;
+  for (const [name, subpath] of Object.entries(MCP_SUBPATHS) as [keyof typeof MCP_SUBPATHS, string][]) {
+    try {
+      paths[name] = resolveMcpEntry(packageDir, subpath);
+    } catch (error) {
+      return `${MCP_PACKAGE}${subpath === "." ? "" : subpath.slice(1)}: ${errorMessage(error)}`;
+    }
   }
   const modules = {} as LoadedModules;
   for (const [name, path] of Object.entries(paths) as [SdkModuleName, string][]) {
@@ -335,7 +352,9 @@ function sdkMembers(modules: LoadedModules): Record<string, unknown> | string {
   for (const [name, { module, kind }] of Object.entries(MEMBERS)) {
     const value = modules[module][name];
     if (kind === "class" ? !isClass(value) : typeof value !== "function") {
-      const path = module === "mcpClient" ? MCP_PACKAGE : SDK_MODULES[module];
+      const path = module in MCP_SUBPATHS
+        ? `${MCP_PACKAGE}${MCP_SUBPATHS[module as keyof typeof MCP_SUBPATHS].slice(1) || ""}`
+        : SDK_MODULES[module as keyof typeof SDK_MODULES];
       return `${path} does not export ${name} as a ${kind}`;
     }
     members[name] = value;

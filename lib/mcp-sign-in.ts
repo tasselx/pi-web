@@ -366,7 +366,9 @@ function prune(flows: Map<string, Flow>): void {
 /**
  * The SDK's store, watched for the `state` it saves and reads back (the one
  * it checks a redirect against), whose writes stop once the server was signed
- * out (`guard`, checked right before the SDK's synchronous write).
+ * out (`guard`, checked right before the SDK's synchronous write). The refresh
+ * lock crosses processes through the SDK's own store; the work done under it
+ * still reads and writes through this wrapper.
  */
 function watchedStore(store: McpOAuthStateStore, flow: Flow, guard: McpSignInWriteGuard): McpOAuthStateStore {
   const note = (state: unknown) => {
@@ -384,6 +386,7 @@ function watchedStore(store: McpOAuthStateStore, flow: Flow, guard: McpSignInWri
       note(state);
       await store.save(state);
     },
+    withRefreshLock: (fn) => store.withRefreshLock(fn),
   };
 }
 

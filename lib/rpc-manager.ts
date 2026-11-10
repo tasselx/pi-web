@@ -1722,6 +1722,7 @@ export class AgentSessionWrapper {
         const excludeFromContext = command.excludeFromContext === true;
         // pi counts a command as running only once executeBash starts; the hook comes first.
         this.userBashPending = true;
+        refreshSleepInhibitor();
         try {
           // pi's TUI and RPC mode ask `user_bash` handlers first: one may run the
           // command itself (a sandbox, a remote host) or hand over how to. A handler

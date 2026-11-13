@@ -10,6 +10,7 @@ export interface AgentEventStreamSession {
   readonly isStreaming: boolean;
   readonly streamingMessage: unknown;
   isAlive?(): boolean;
+  isExtensionShutdownRequested?(): boolean;
   onEvent(listener: (event: AgentEventLike) => void): () => void;
 }
 
@@ -50,11 +51,12 @@ export const TOOL_UPDATE_COALESCE_MS = 150;
  * Whether a later event repairs this one if it is dropped. A `*_delta` only
  * extends a block that its `*_end` replaces with the authoritative content, and
  * `tool_execution_update` carries the whole partial result, which the next update
- * or `tool_execution_end` supersedes. `*_start` / `*_end` are never dropped: the
+ * or `tool_execution_end` supersedes, as the next `bash_output` (a command's output
+ * tail) or the command's result supersedes one. `*_start` / `*_end` are never dropped: the
  * client's stream reducer creates and finalizes blocks from them.
  */
 function isDroppableEvent(event: AgentEventLike): boolean {
-  if (event.type === "tool_execution_update") return true;
+  if (event.type === "tool_execution_update" || event.type === "bash_output") return true;
   if (event.type !== "message_update") return false;
   const update = event.assistantMessageEvent;
   return typeof update === "object"
@@ -291,7 +293,7 @@ export function createAgentEventStream(
         try {
           const session = await sessionPromise;
           if (closed) return;
-          if (session.isAlive && !session.isAlive()) {
+          if (session.isAlive && !session.isAlive() && !session.isExtensionShutdownRequested?.()) {
             cleanup(true);
             return;
           }
@@ -299,6 +301,11 @@ export function createAgentEventStream(
           const bufferedEvents: AgentEventLike[] = [];
           let snapshotPublished = false;
           const handleEvent = (event: AgentEventLike) => {
+            if (event.type === "session_ended") {
+              encode(event);
+              cleanup(true);
+              return;
+            }
             if (event.type === "session_shutdown") {
               cleanup(true);
               return;
@@ -315,7 +322,7 @@ export function createAgentEventStream(
             stopListening();
             return;
           }
-          if (session.isAlive && !session.isAlive()) {
+          if (session.isAlive && !session.isAlive() && !session.isExtensionShutdownRequested?.()) {
             stopListening();
             cleanup(true);
             return;

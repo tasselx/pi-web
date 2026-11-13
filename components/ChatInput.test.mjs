@@ -11,7 +11,7 @@ const jiti = createJiti(import.meta.url, {
 });
 const React = await jiti.import("react");
 const { renderToStaticMarkup } = await jiti.import("react-dom/server");
-const { ChatInput, ModelErrorBanner, ModelScopeWarningBanner, RUN_END_CLICK_GUARD_MS, autoGrowTextarea, canClearBuiltinCommandInput, canRestoreUserMessage, canRunBuiltinSlashCommandWhileStreaming, cycleListIndex, filterModelOptions, getUpwardMenuMaxHeight, getUserMessageText, getUserMessageDraftImages, isExactSlashCommand, isRunEndStrayClick, modelSupportsImageInput, offersBuiltinSlashCommandWhileStreaming, replaceLinksWithMarkdown, readImageFile, replaceTextareaRange, stacksComposerLayout, submitsSlashCommandOnEnter } = await jiti.import("./ChatInput.tsx");
+const { ChatInput, ModelErrorBanner, ModelScopeWarningBanner, RUN_END_CLICK_GUARD_MS, autoGrowTextarea, scrollTextareaCaretIntoView, canClearBuiltinCommandInput, canRestoreUserMessage, canRunBuiltinSlashCommandWhileStreaming, cycleListIndex, filterModelOptions, getUpwardMenuMaxHeight, getUserMessageText, getUserMessageDraftImages, isExactSlashCommand, isRunEndStrayClick, modelSupportsImageInput, offersBuiltinSlashCommandWhileStreaming, replaceLinksWithMarkdown, readImageFile, replaceTextareaRange, stacksComposerLayout, submitsSlashCommandOnEnter } = await jiti.import("./ChatInput.tsx");
 const { isBareMcpCommand } = await jiti.import("@/lib/mcp-command");
 const { ModelSelector } = await jiti.import("./ModelSelector.tsx");
 // As ChatInput.tsx imports it: on Windows jiti loads "@/lib/draft-store.ts"
@@ -709,6 +709,9 @@ test("locks built-in command submission until it settles", async () => {
     attachedImages: [],
     attachedImagesRef: { current: [] },
     builtinCommandPendingRef: { current: false },
+    builtinCommandFocusRef: { current: null },
+    textareaRef: { current: null },
+    document: { activeElement: {} },
     canClearBuiltinCommandInput,
     clearInput() {},
     onBuiltinCommand: async () => new Promise((resolve) => { callback.resolve = resolve; }),
@@ -1088,6 +1091,7 @@ test("grows the composer to its text and hides the scrollbar until the text is t
   const fake = (value, scrollHeight, clientHeight) => ({
     value,
     style: { height: "", overflowY: "" },
+    scrollTop: 0,
     get scrollHeight() { return scrollHeight; },
     clientHeight,
   });
@@ -1108,21 +1112,44 @@ test("grows the composer to its text and hides the scrollbar until the text is t
   assert.equal(tall.style.overflowY, "auto", "capped text scrolls");
 });
 
-test("scrolls to bottom when typing or breaking at the end of capped text", () => {
-  const fake = (value, scrollHeight, clientHeight, selectionEnd = value.length, scrollTop = 0) => ({
+test("a capped composer keeps its scroll while it regrows, so a caret at the end stays visible", () => {
+  // As a browser does: an "auto" height fits the whole text, which clamps
+  // scrollTop to 0.
+  const fake = (value, scrollHeight, clientHeight) => {
+    let height = "";
+    const ta = {
+      value,
+      style: {
+        overflowY: "",
+        get height() { return height; },
+        set height(next) { height = next; if (next === "auto") ta.scrollTop = 0; },
+      },
+      scrollTop: 40,
+      get scrollHeight() { return scrollHeight; },
+      clientHeight,
+    };
+    return ta;
+  };
+
+  const tall = fake("lots of lines", 320, 24);
+  autoGrowTextarea(tall);
+  assert.equal(tall.style.height, "200px");
+  assert.equal(tall.scrollTop, 40, "the auto-height reset does not leave the box scrolled back to the top");
+});
+
+test("a programmatic caret at the end scrolls an overflowing box to its bottom, a mid-text caret does not", () => {
+  const fake = (value, selectionEnd, scrollHeight) => ({
     value,
-    style: { height: "", overflowY: "" },
-    get scrollHeight() { return scrollHeight; },
-    clientHeight,
     selectionEnd,
-    scrollTop,
+    scrollTop: 0,
+    get scrollHeight() { return scrollHeight; },
   });
 
-  const atBottom = fake("lots\nmore", 320, 200, 9, 20);
-  autoGrowTextarea(atBottom);
-  assert.equal(atBottom.scrollTop, 320, "follows the cursor at the end to the bottom");
+  const atEnd = fake("many\nlines", 10, 320);
+  scrollTextareaCaretIntoView(atEnd);
+  assert.equal(atEnd.scrollTop, 320, "a caret at the very end scrolls to the bottom");
 
-  const inMiddle = fake("lots\nmore", 320, 200, 2, 20);
-  autoGrowTextarea(inMiddle);
-  assert.equal(inMiddle.scrollTop, 20, "preserves scroll position when editing in the middle");
+  const mid = fake("many\nlines", 3, 320);
+  scrollTextareaCaretIntoView(mid);
+  assert.equal(mid.scrollTop, 0, "a mid-text caret leaves the scroll alone");
 });

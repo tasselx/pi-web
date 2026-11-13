@@ -442,7 +442,7 @@ function ProviderDetail({ name, editingName, provider, onChange, onEditingNameCh
       </div>
 
        <Field label={t("i18n.providerId")}>
-        <TextInput value={editingName} onChange={setEditingName} placeholder="provider-id" mono />
+        <TextInput value={editingName} onChange={onEditingNameChange} placeholder="provider-id" mono />
         {editingName !== name && editingName.trim() && (
           <button onClick={() => onRename(editingName.trim())}
             style={{ marginTop: 4, padding: "3px 10px", background: "var(--accent)", border: "none", borderRadius: 4, color: "var(--accent-contrast)", cursor: "pointer", fontSize: 11, alignSelf: "flex-start" }}>

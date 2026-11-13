@@ -64,7 +64,9 @@ export async function checkDirectoryPicker({ browser, base, fixture }) {
       await project.click();
       const menu = page.getByRole("menu");
       await menu.waitFor();
-      await menu.getByRole("menuitem", { name: /^(Open another project…|Custom path…)$/ }).click();
+      // This fork's item is "Choose folder…": it tries the OS dialog first and
+      // falls back to the in-app picker where there is none (CI).
+      await menu.getByRole("menuitem", { name: /^(Choose folder…|Open another project…|Custom path…)$/ }).click();
       const panel = page.locator(".directory-picker-panel");
       await panel.waitFor({ state: "visible" });
       await panel.getByText("Loading directories…").waitFor({ state: "detached" });

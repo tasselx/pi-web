@@ -270,43 +270,15 @@
 }
 
 /* Lock toggle at the bottom of the rail: while locked, the preview panel
-   does not pop out on hover. 离轨道（窗口）底边 3px：30px 高的按钮中心因此在底边上方 18px，
-   正是 36px 高的状态栏带的正中，锁和状态栏的文字在同一水平线上。 */
+   does not pop out on hover. Only where it sits; its look is LockToggle's; 3px off the
+   rail's bottom edge puts the 30px button's center 18px up — the middle line of the
+   36px status strip the lock's row shares. */
 .lock {
   position: absolute;
   bottom: 3px;
   left: 50%;
   z-index: 3;
-  display: flex;
-  align-items: center;
-  justify-content: center;
   width: 30px;
   height: 30px;
-  padding: 0;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--text-dim);
-  cursor: pointer;
   transform: translateX(-50%);
-  transition: color 100ms ease, background 100ms ease;
-}
-
-.lock:hover {
-  color: var(--text);
-  background: color-mix(in srgb, var(--text) 6%, transparent);
-}
-
-/* A locked padlock is gold. */
-.lock[aria-pressed="true"] {
-  color: #d4af37;
-}
-
-.lock[aria-pressed="true"]:hover {
-  color: #e6c65a;
-}
-
-.lock:focus-visible {
-  outline: 1px solid color-mix(in srgb, var(--text-muted) 65%, transparent);
-  outline-offset: 1px;
 }

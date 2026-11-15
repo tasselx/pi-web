@@ -232,7 +232,6 @@ async function runSkillsCli(args: string[], scope: SkillInstallScope, cwd: strin
     const { stdout, stderr } = await runNpx(args, {
       timeout: CLI_TIMEOUT_MS,
       cwd: scope === "project" ? cwd : undefined,
-      env: { ...process.env, FORCE_COLOR: "0" },
     });
     return `${stdout}${stderr}`.replace(ANSI_RE, "").trim();
   } catch (error: unknown) {

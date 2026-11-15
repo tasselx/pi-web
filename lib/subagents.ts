@@ -7,6 +7,7 @@ import { parseFrontmatter } from "./frontmatter";
 import { parseNpmSource } from "./npm-source";
 import { writePrivateFileAtomicSync } from "./atomic-file";
 import { isExistingPathWithinRoots } from "./path-security";
+import { getProjectTrustStatus } from "./project-trust";
 import { disabledBuiltInSubagents } from "./subagent-settings";
 import { PRESET_READ_ONLY } from "./tool-presets";
 import type { SessionEntry, SubagentSessionStatus } from "./types";
@@ -138,10 +139,9 @@ export interface SubagentRunInfo {
 }
 
 const DEFAULT_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
-const BUILTIN_TOOLS = new Set(DEFAULT_TOOLS);
-// `powershell` is platform-added by resolveShellTools and therefore is absent from
-// profile parsing's portable allow-list, but valid historical snapshots may contain it.
-const SNAPSHOT_BUILTIN_TOOLS = new Set([...BUILTIN_TOOLS, "powershell"]);
+// A profile may name `powershell` explicitly; the defaults stay portable, and
+// resolveShellTools() picks the platform's shell for either name at spawn.
+const BUILTIN_TOOLS = new Set([...DEFAULT_TOOLS, "powershell"]);
 const SUBAGENT_CONTROL_TOOLS = new Set<string>(SUBAGENT_CONTROL_TOOL_NAMES);
 const THINKING_LEVELS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
@@ -484,9 +484,14 @@ export function listSubagentProfileSources(cwd: string): SubagentProfile[] {
 }
 
 export function listSubagentProfiles(cwd: string): SubagentProfile[] {
+  // A project or workspace profile is the project's own system prompt and tool
+  // grant for a child, so it loads only in a trusted folder, as pi loads
+  // `.pi/SYSTEM.md`, skills and prompts.
+  const projectTrusted = getProjectTrustStatus(cwd, getAgentDir()).trusted;
   // A same-name file replaces the built-in outright, its own `enabled` included.
   const byName = new Map(builtInProfiles().map((profile) => [profile.name.toLowerCase(), profile]));
   for (const [dir, scope] of profileDirectories(cwd)) {
+    if (scope !== "global" && !projectTrusted) continue;
     for (const profile of readProfileDirectory(dir, scope, cwd)) byName.set(profile.name.toLowerCase(), profile);
   }
   return [...byName.values()].sort((a, b) => a.displayName.localeCompare(b.displayName));
@@ -691,7 +696,7 @@ export function readSubagentSessionResources(
       typeof item === "string"
       && item.length > 0
       && !SUBAGENT_CONTROL_TOOLS.has(item)
-      && ((item === "codemode" && codemode) || SNAPSHOT_BUILTIN_TOOLS.has(item) || loadExtensions)
+      && ((item === "codemode" && codemode) || BUILTIN_TOOLS.has(item) || loadExtensions)
     )
   ) {
     return {

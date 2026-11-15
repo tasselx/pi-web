@@ -8,11 +8,12 @@ import {
   markdownPreviewRemarkPlugins,
   normalizeDisplayMath,
 } from "@/lib/markdown";
-import { isMessageGroupAnchor, splitFinalAssistantBlocks } from "@/lib/message-display";
+import { hasTurnRef, isHiddenCustomMessage, splitFinalAssistantBlocks } from "@/lib/message-display";
 import { loadMinimapPreviewLocked, saveMinimapPreviewLocked } from "@/lib/minimap-preview-lock";
 import type { AgentMessage, AssistantMessage, CustomMessage, TextContent, UserMessage } from "@/lib/types";
 import { useI18n } from "@/hooks/useI18n";
 import styles from "./ChatMinimap.module.css";
+import { LockToggle } from "./LockToggle";
 
 interface Props {
   messages: AgentMessage[];
@@ -27,6 +28,8 @@ interface Props {
    *  轨道（连同悬停预览和小锁）画在槽里，所以一路延伸到底，预览也浮在输入栏上方；
    *  消息行里原来的位置只留一块等宽的占位，列表宽度不变。槽还没挂上时不画轨道。 */
   railSlot?: HTMLElement | null;
+  /** ChatWindow's getTurnAnchors() over `messages`: the minimap groups and reads refs as it renders. */
+  turnAnchors: readonly boolean[];
 }
 
 const MINIMAP_WIDTH = 36;
@@ -259,6 +262,7 @@ export const ChatMinimap = memo(function ChatMinimap({
   onRevealHistory,
   turnsBefore,
   railSlot,
+  turnAnchors,
 }: Props) {
   const { t } = useI18n();
   const [visible, setVisible] = useState(false);
@@ -289,6 +293,8 @@ export const ChatMinimap = memo(function ChatMinimap({
 
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
+  const turnAnchorsRef = useRef(turnAnchors);
+  turnAnchorsRef.current = turnAnchors;
 
   const nodeLayout = useMemo(
     () => layoutNodes(allNodes, minimapHeight),
@@ -356,11 +362,16 @@ export const ChatMinimap = memo(function ChatMinimap({
       const allMessages: (AgentMessage | Partial<AgentMessage>)[] = streamingMessage
         ? [...messagesRef.current, streamingMessage]
         : messagesRef.current;
-      for (const message of allMessages) {
-        const isAnchor = isMessageGroupAnchor(message);
+      for (const [messageIdx, message] of allMessages.entries()) {
+        // The streaming reply, past `messages`, is never an anchor.
+        const isAnchor = turnAnchorsRef.current[messageIdx] === true;
         if (!isAnchor && message.role !== "assistant") continue;
-        const element = refs?.[refIndex];
-        refIndex++;
+        // ChatWindow's refs, in the same order: a hidden anchor renders nothing and has none.
+        let element: HTMLDivElement | null = null;
+        if (hasTurnRef(message, isAnchor)) {
+          element = refs?.[refIndex] ?? null;
+          refIndex++;
+        }
 
         if (isAnchor) {
           currentTurn = null;
@@ -378,6 +389,10 @@ export const ChatMinimap = memo(function ChatMinimap({
         }
 
         if (!currentTurn) continue;
+        // A turn a hidden message opened starts where its first reply shows.
+        if (currentTurn.scrollTop === null && element && isHiddenCustomMessage(currentTurn.userMessage)) {
+          currentTurn.scrollTop = element.getBoundingClientRect().top - containerRect.top + scrollEl.scrollTop;
+        }
         currentTurn.toolCount += countToolCalls(message);
         const answerMarkdown = getAssistantAnswerMarkdown(message);
         if (answerMarkdown) {
@@ -464,7 +479,7 @@ export const ChatMinimap = memo(function ChatMinimap({
       updateScroll();
     }, 50);
     return () => clearTimeout(timeout);
-  }, [messages.length, measureNodes, updateScroll]);
+  }, [messages.length, turnAnchors, measureNodes, updateScroll]);
 
   const scrollToNode = useCallback((node: NodeInfo, behavior: ScrollBehavior) => {
     const scrollEl = scrollContainer.current;
@@ -730,11 +745,10 @@ export const ChatMinimap = memo(function ChatMinimap({
         );
       })}
 
-      <button
-        type="button"
+      <LockToggle
+        locked={locked}
         className={styles.lock}
         data-minimap-lock={locked ? "on" : "off"}
-        aria-pressed={locked}
         title={t(locked ? "chatMinimap.unlockPreview" : "chatMinimap.lockPreview")}
         aria-label={t("chatMinimap.lockPreview")}
         onMouseDown={(event) => event.stopPropagation()}
@@ -742,26 +756,7 @@ export const ChatMinimap = memo(function ChatMinimap({
           event.stopPropagation();
           toggleLock();
         }}
-      >
-        <svg
-          width="16"
-          height="16"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          aria-hidden="true"
-        >
-          <rect x="4" y="11" width="16" height="10" rx="2" />
-          {locked ? (
-            <path d="M8 11V7a4 4 0 0 1 8 0v4" />
-          ) : (
-            <path d="M8 11V7a4 4 0 0 1 7.9-.9" />
-          )}
-        </svg>
-      </button>
+      />
 
       {minimapHovered && allNodes.length > 0 && (
         <div
@@ -821,7 +816,9 @@ export const ChatMinimap = memo(function ChatMinimap({
                     }}
                   >
                     <span className={styles.userText}>
-                      {getUserPreview(node.targetTurn.userMessage)}
+                      {isHiddenCustomMessage(node.targetTurn.userMessage)
+                        ? t("chatMinimap.extensionTurn", { type: (node.targetTurn.userMessage as CustomMessage).customType })
+                        : getUserPreview(node.targetTurn.userMessage)}
                     </span>
                   </button>
 

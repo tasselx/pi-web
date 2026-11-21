@@ -18,6 +18,13 @@ import { useEnterSendMode, setEnterSendMode } from "@/hooks/useEnterSendMode";
 import { useFilesPlacement, setFilesPlacement } from "@/hooks/useFilesPlacement";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { clearStoredDrafts } from "@/lib/draft-store";
+import {
+  COMPACTION_TRIGGER_MAX_PERCENT,
+  COMPACTION_TRIGGER_MIN_PERCENT,
+  compactionTriggerPercent,
+  reserveTokensForTriggerPercent,
+} from "@/lib/compaction-settings";
+import { formatCompactCount } from "@/lib/session-stats-format";
 import type { AppUpdateResponse, ProjectTrustStatus, SleepInhibitStatus, ToolSettingsResponse } from "@/lib/api-types";
 import { SETTINGS_BUILTIN_TOOLS } from "@/lib/tool-presets";
 import {
@@ -105,6 +112,13 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
   const [cacheMissNotices, setCacheMissNotices] = useState<boolean | null>(null);
   const [cacheMissNoticesSaving, setCacheMissNoticesSaving] = useState(false);
   const [cacheMissNoticesError, setCacheMissNoticesError] = useState<string | null>(null);
+  const [autoCompaction, setAutoCompaction] = useState<boolean | null>(null);
+  const [autoCompactionSaving, setAutoCompactionSaving] = useState(false);
+  const [autoCompactionError, setAutoCompactionError] = useState<string | null>(null);
+  const [compactionModel, setCompactionModel] = useState<{ provider: string; modelId: string; contextWindow: number } | null>(null);
+  const [compactionTokens, setCompactionTokens] = useState<{ reserveTokens: number; modelOverride: boolean } | null>(null);
+  const [thresholdDraft, setThresholdDraft] = useState<number | null>(null);
+  const [thresholdSaving, setThresholdSaving] = useState(false);
   // 「运行时防止系统休眠」：开关和它在服务端那台机器上的真实状态都以服务端的回复为准。
   const [sleepInhibit, setSleepInhibit] = useState<SleepInhibitStatus | null>(null);
   const [sleepInhibitSaving, setSleepInhibitSaving] = useState(false);
@@ -202,6 +216,56 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
 
   useEffect(() => {
     let cancelled = false;
+    void (async () => {
+      // The trigger slider is per model, so it needs the live session's model and
+      // window; the switch works without one.
+      let model: { provider: string; modelId: string; contextWindow: number } | null = null;
+      if (sessionId) {
+        try {
+          const response = await fetch(`/api/agent/${sessionId}?systemPrompt=0`);
+          const data = await response.json() as {
+            running?: boolean;
+            state?: {
+              model?: { provider?: string; id?: string; contextWindow?: number };
+              contextUsage?: { contextWindow?: number } | null;
+            };
+          };
+          const stateModel = data.running ? data.state?.model : undefined;
+          const contextWindow = data.state?.contextUsage?.contextWindow ?? stateModel?.contextWindow ?? 0;
+          if (stateModel?.provider && stateModel.id && contextWindow > 0) {
+            model = { provider: stateModel.provider, modelId: stateModel.id, contextWindow };
+          }
+        } catch {
+          // A session without a live wrapper has no model to bind the slider to.
+        }
+      }
+      if (cancelled) return;
+      setCompactionModel(model);
+      const query = model
+        ? `?provider=${encodeURIComponent(model.provider)}&modelId=${encodeURIComponent(model.modelId)}`
+        : "";
+      const response = await fetch(`/api/compaction${query}`);
+      const data = await response.json() as {
+        enabled?: boolean;
+        reserveTokens?: number;
+        modelOverride?: boolean;
+        error?: string;
+      };
+      if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
+      if (cancelled) return;
+      setAutoCompaction(data.enabled === true);
+      setCompactionTokens(typeof data.reserveTokens === "number"
+        ? { reserveTokens: data.reserveTokens, modelOverride: data.modelOverride === true }
+        : null);
+      setThresholdDraft(null);
+    })().catch((cause) => {
+      if (!cancelled) setAutoCompactionError(cause instanceof Error ? cause.message : String(cause));
+    });
+    return () => { cancelled = true; };
+  }, [sessionId]);
+
+  useEffect(() => {
+    let cancelled = false;
     void fetch("/api/sleep-inhibit")
       .then(async (response) => {
         const data = await response.json() as SleepInhibitStatus & { error?: string };
@@ -252,6 +316,112 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
       setCacheMissNoticesError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setCacheMissNoticesSaving(false);
+    }
+  };
+
+  // pi's compaction.enabled: the global file covers new sessions, the open chat is told now.
+  const toggleAutoCompaction = async (enabled: boolean) => {
+    setAutoCompactionSaving(true);
+    setAutoCompactionError(null);
+    try {
+      const response = await fetch("/api/compaction", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      });
+      const data = await response.json() as { enabled?: boolean; error?: string };
+      if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
+      const next = data.enabled === true;
+      setAutoCompaction(next);
+      if (sessionId) {
+        try {
+          await sendAgentCommand(sessionId, { type: "set_auto_compaction", enabled: next });
+        } catch (cause) {
+          // The global setting is saved; this session keeps the old value until it restarts.
+          setAutoCompactionError(cause instanceof Error ? cause.message : String(cause));
+        }
+      }
+    } catch (cause) {
+      setAutoCompactionError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setAutoCompactionSaving(false);
+    }
+  };
+
+  // The trigger is per model: write its reserveTokens override, then re-read
+  // settings in the open session without reloading its extensions.
+  const reloadCompactionSettings = async () => {
+    if (!sessionId) return;
+    try {
+      await sendAgentCommand(sessionId, { type: "reload_settings" });
+    } catch (cause) {
+      // The file is saved; this session picks it up on its next reload.
+      setAutoCompactionError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+
+  const saveCompactionThreshold = async (percent: number) => {
+    if (!compactionModel || thresholdSaving) return;
+    const reserveTokens = reserveTokensForTriggerPercent(compactionModel.contextWindow, percent);
+    if (compactionTokens && reserveTokens === compactionTokens.reserveTokens) {
+      setThresholdDraft(null);
+      return;
+    }
+    setThresholdSaving(true);
+    setAutoCompactionError(null);
+    try {
+      const response = await fetch("/api/compaction", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider: compactionModel.provider,
+          modelId: compactionModel.modelId,
+          reserveTokens,
+        }),
+      });
+      const data = await response.json() as { reserveTokens?: number; modelOverride?: boolean; error?: string };
+      if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
+      setCompactionTokens({
+        reserveTokens: data.reserveTokens ?? reserveTokens,
+        modelOverride: data.modelOverride === true,
+      });
+      setThresholdDraft(null);
+      await reloadCompactionSettings();
+    } catch (cause) {
+      // The thumb snaps back to the saved trigger, which the error above explains.
+      setThresholdDraft(null);
+      setAutoCompactionError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setThresholdSaving(false);
+    }
+  };
+
+  const resetCompactionThreshold = async () => {
+    if (!compactionModel || thresholdSaving) return;
+    setThresholdSaving(true);
+    setAutoCompactionError(null);
+    try {
+      const response = await fetch("/api/compaction", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider: compactionModel.provider,
+          modelId: compactionModel.modelId,
+          reserveTokens: null,
+        }),
+      });
+      const data = await response.json() as { reserveTokens?: number; modelOverride?: boolean; error?: string };
+      if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
+      setCompactionTokens({
+        reserveTokens: data.reserveTokens ?? compactionTokens?.reserveTokens ?? 0,
+        modelOverride: data.modelOverride === true,
+      });
+      setThresholdDraft(null);
+      await reloadCompactionSettings();
+    } catch (cause) {
+      setAutoCompactionError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setThresholdSaving(false);
     }
   };
 
@@ -356,6 +526,18 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
       setUpdateChecking(false);
     }
   };
+
+  const compactionContextWindow = compactionModel?.contextWindow ?? 0;
+  const savedTriggerPercent = compactionTokens
+    ? compactionTriggerPercent(compactionContextWindow, compactionTokens.reserveTokens)
+    : null;
+  const thresholdValue = thresholdDraft ?? savedTriggerPercent;
+  const thresholdReserve = thresholdDraft === null
+    ? compactionTokens?.reserveTokens ?? null
+    : thresholdValue === null ? null : reserveTokensForTriggerPercent(compactionContextWindow, thresholdValue);
+  const thresholdTriggerTokens = thresholdReserve === null || compactionContextWindow <= 0
+    ? null
+    : Math.max(0, compactionContextWindow - thresholdReserve);
 
   return (
     <div className="settings-general">
@@ -527,6 +709,66 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
         </div>
         <p id="settings-cache-miss-notices-description" className="settings-general-description">{t("settings.cacheMissNoticesDescription")}</p>
         {cacheMissNoticesError && <p role="alert" className="settings-general-error">{cacheMissNoticesError}</p>}
+      </section>
+
+      <section className="settings-general-section">
+        <h3 className="settings-general-heading">{t("settings.context")}</h3>
+        <div className="settings-chat-options">
+          <div className="settings-chat-option settings-chat-switch-option">
+            <span>{t("settings.autoCompaction")}</span>
+            <ConfigSwitch
+              checked={autoCompaction === true}
+              loading={(autoCompaction === null && !autoCompactionError) || autoCompactionSaving}
+              label={t("settings.autoCompaction")}
+              describedBy="settings-auto-compaction-description"
+              onChange={(enabled) => void toggleAutoCompaction(enabled)}
+            />
+          </div>
+          {compactionModel && thresholdValue !== null && thresholdTriggerTokens !== null && (
+            <div className="settings-chat-option settings-chat-range-option">
+              <div className="settings-chat-range-header">
+                <label htmlFor="settings-auto-compaction-threshold">{t("settings.autoCompactionThreshold")}</label>
+                <output htmlFor="settings-auto-compaction-threshold">{thresholdValue.toFixed(1)}%</output>
+                <ConfigButton
+                  variant="ghost"
+                  size="small"
+                  className="settings-chat-reset"
+                  title={t("settings.autoCompactionThresholdReset")}
+                  aria-label={t("settings.autoCompactionThresholdReset")}
+                  disabled={!compactionTokens?.modelOverride || thresholdSaving}
+                  onClick={() => void resetCompactionThreshold()}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8M3 3v5h5" />
+                  </svg>
+                </ConfigButton>
+              </div>
+              <input
+                id="settings-auto-compaction-threshold"
+                type="range"
+                min={COMPACTION_TRIGGER_MIN_PERCENT}
+                max={COMPACTION_TRIGGER_MAX_PERCENT}
+                step={0.1}
+                value={thresholdValue}
+                disabled={thresholdSaving}
+                aria-valuetext={t("settings.autoCompactionThresholdValue", { percent: thresholdValue.toFixed(1) })}
+                aria-describedby="settings-auto-compaction-threshold-description"
+                onChange={(event) => setThresholdDraft(Number(event.target.value))}
+                onPointerUp={(event) => void saveCompactionThreshold(Number(event.currentTarget.value))}
+                onKeyUp={(event) => void saveCompactionThreshold(Number(event.currentTarget.value))}
+                onBlur={() => { if (thresholdDraft !== null) void saveCompactionThreshold(thresholdDraft); }}
+              />
+              <p id="settings-auto-compaction-threshold-description" className="settings-general-description">
+                {t("settings.autoCompactionThresholdHint", {
+                  tokens: formatCompactCount(thresholdTriggerTokens),
+                  context: formatCompactCount(compactionContextWindow),
+                })}
+              </p>
+            </div>
+          )}
+        </div>
+        <p id="settings-auto-compaction-description" className="settings-general-description">{t("settings.autoCompactionDescription")}</p>
+        {autoCompactionError && <p role="alert" className="settings-general-error">{autoCompactionError}</p>}
       </section>
 
       <section className="settings-general-section">

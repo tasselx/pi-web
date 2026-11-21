@@ -26,6 +26,7 @@ export interface ContextUsage {
 export interface ModelLike {
   id: string;
   provider: string;
+  contextWindow?: number;
   /** Dollars per million tokens. */
   cost?: { input: number; output: number; cacheRead: number; cacheWrite: number };
 }

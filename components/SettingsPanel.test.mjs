@@ -48,6 +48,48 @@ test("only an HTTP error fails the sleep request; a failed hold arrives as statu
   assert.match(save, /setSleepInhibit\(data\)/);
 });
 
+test("the auto-compaction switch saves pi's global setting and applies it to the open chat", () => {
+  const section = settingsSource.match(/<h3 className="settings-general-heading">\{t\("settings\.context"\)\}<\/h3>[\s\S]*?<\/section>/)?.[0] ?? "";
+  assert.ok(section, "the Context section");
+  assert.match(section, /checked=\{autoCompaction === true\}/);
+  assert.match(section, /loading=\{\(autoCompaction === null && !autoCompactionError\) \|\| autoCompactionSaving\}/);
+  assert.match(section, /describedBy="settings-auto-compaction-description"/);
+  const save = settingsSource.match(/const toggleAutoCompaction = async[\s\S]*?\n  \};\n/)?.[0] ?? "";
+  assert.ok(save, "the save handler");
+  assert.match(save, /fetch\("\/api\/compaction"/);
+  assert.match(save, /type: "set_auto_compaction"/);
+
+  // The trigger slider writes one model's reserve override; the open chat re-reads settings.
+  assert.match(section, /id="settings-auto-compaction-threshold"/);
+  assert.match(section, /min=\{COMPACTION_TRIGGER_MIN_PERCENT\}/);
+  assert.match(section, /max=\{COMPACTION_TRIGGER_MAX_PERCENT\}/);
+  assert.match(section, /step=\{0\.1\}/);
+  assert.match(section, /onPointerUp=/);
+  const thresholdSave = settingsSource.match(/const saveCompactionThreshold = async[\s\S]*?\n  \};\n/)?.[0] ?? "";
+  assert.ok(thresholdSave, "the trigger save handler");
+  assert.match(thresholdSave, /reserveTokensForTriggerPercent/);
+  assert.match(thresholdSave, /reserveTokens,/);
+  assert.match(thresholdSave, /await reloadCompactionSettings\(\)/);
+  const reset = settingsSource.match(/const resetCompactionThreshold = async[\s\S]*?\n  \};\n/)?.[0] ?? "";
+  assert.ok(reset, "the trigger reset handler");
+  assert.match(reset, /reserveTokens: null/);
+  assert.match(settingsSource, /type: "reload_settings"/);
+
+  for (const [name, locale] of [["en", enLocale], ["zh-CN", zhCNLocale], ["zh-TW", zhTWLocale]]) {
+    for (const key of [
+      "settings.context",
+      "settings.autoCompaction",
+      "settings.autoCompactionDescription",
+      "settings.autoCompactionThreshold",
+      "settings.autoCompactionThresholdValue",
+      "settings.autoCompactionThresholdReset",
+      "settings.autoCompactionThresholdHint",
+    ]) {
+      assert.ok(locale.messages[key], `${name} ${key}`);
+    }
+  }
+});
+
 test("the sleep setting is named and described as specified, in all three languages", () => {
   assert.equal(zhCNLocale.messages["settings.preventSleep"], "运行时防止系统休眠");
   assert.equal(zhCNLocale.messages["settings.preventSleepDescription"], "在 pi-web 运行任务时，让电脑保持唤醒状态。");

@@ -123,7 +123,7 @@ interface LastAssistantTextResponse {
 }
 
 type AgentStateResponse = {
-  model?: { provider: string; id: string };
+  model?: { provider: string; id: string; contextWindow?: number };
   contextUsage?: { percent: number | null; contextWindow: number; tokens: number | null } | null;
   /** Active time over the live wrapper's entries (the snapshot carries the same field). */
   totalActiveMs?: number;

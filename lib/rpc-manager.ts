@@ -1634,7 +1634,13 @@ export class AgentSessionWrapper {
           isCompacting: this.inner.isCompacting,
           autoCompactionEnabled: this.inner.autoCompactionEnabled,
           autoRetryEnabled: this.inner.autoRetryEnabled,
-          model: model ? { id: model.id, provider: model.provider } : undefined,
+          model: model
+            ? {
+                id: model.id,
+                provider: model.provider,
+                ...(model.contextWindow !== undefined ? { contextWindow: model.contextWindow } : {}),
+              }
+            : undefined,
           messageCount: 0,
           pendingMessageCount: this.inner.pendingMessageCount,
           queuedMessages: this.mergedQueuedMessages(),
@@ -1874,6 +1880,13 @@ export class AgentSessionWrapper {
 
       case "set_auto_compaction": {
         this.inner.setAutoCompactionEnabled(command.enabled as boolean);
+        return null;
+      }
+
+      // Settings › General's compaction trigger: re-read settings.json without
+      // reloading extensions, so this session uses the new token override now.
+      case "reload_settings": {
+        await this.inner.settingsManager.reload();
         return null;
       }
 

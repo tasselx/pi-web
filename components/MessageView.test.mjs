@@ -640,6 +640,24 @@ test("offers compaction on an unanswered truncation and keeps its error with the
   assert.equal(compacted, 0);
 });
 
+test("the truncation recovery button does not pass its click event as compaction instructions", () => {
+  // A DOM event reaches handleCompact()'s customInstructions and is JSON.stringify'd
+  // into the compact command, which throws on the button's React fiber cycle.
+  const source = ts.createSourceFile("MessageView.tsx", readFileSync(new URL("./MessageView.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const directHandlers = [];
+  function visit(node) {
+    if (ts.isJsxAttribute(node) && node.name.getText(source) === "onClick") {
+      const expression = node.initializer?.expression;
+      if (expression && ts.isIdentifier(expression) && expression.text === "onCompact") {
+        directHandlers.push(node.getStart(source));
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(source);
+  assert.deepEqual(directHandlers, []);
+});
+
 test("renders partial assistant content before the provider error", () => {
   const html = renderMessage({
     role: "assistant",

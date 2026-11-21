@@ -18,13 +18,14 @@ import { normalizeToolCalls } from "@/lib/normalize";
 import { AgentCommandError, agentStatusUrl, EXTENSION_REPORTED_CODE, isPromptRejectedError, sendAgentCommand } from "@/lib/agent-client";
 import { createSideChat, SIDE_REFUSAL_MESSAGES } from "@/lib/side-chat-client";
 import { missingCwdFromBody } from "@/lib/missing-cwd";
+import { forkFailureMessage } from "@/lib/sidebar-actions";
 import {
   deleteSessionViewSnapshot,
   getSessionViewSnapshot,
   setSessionViewSnapshot,
   snapshotCoversLoadedEntries,
 } from "@/lib/session-view-cache";
-import { clearDraft, getDraft, parkedNewSessionDraftKey, rekeyDraft, restoreDraftSubmission, setDraft, type ChatDraft } from "@/lib/draft-store";
+import { clearDraft, getDraft, holdStoredDraft, parkedNewSessionDraftKey, rekeyDraft, restoreDraftSubmission, setDraft, type ChatDraft } from "@/lib/draft-store";
 import { getPreferredToolPreset, setPreferredToolPreset } from "@/lib/tool-preset-preference";
 import {
   availableRecentModels,
@@ -39,7 +40,7 @@ import type { SessionStatsInfo } from "@/lib/pi-types";
 import { mergeSessionStats, type SessionFileStats } from "@/lib/session-stats";
 import { formatSessionSummary } from "@/lib/session-stats-format";
 import { userMessageKey } from "@/lib/prompt-recovery";
-import { carryMessageKeys, messageRenderKeys } from "@/lib/message-keys";
+import { carryMessageKeys, messageRenderKeys, withLiveUserEntryId, type DeliveredUserMessage } from "@/lib/message-keys";
 import { createIdleMessageReads, entriesAfter } from "@/lib/idle-message-read";
 import { isHiddenCustomMessage } from "@/lib/message-display";
 import {
@@ -53,7 +54,7 @@ import { HIDDEN_PAGE_GRACE_MS } from "@/hooks/usePageHidden";
 import type { DebugClientLease, DebugClientSession, DebugEventConnectionSnapshot, DebugStreamCloseReason } from "@/lib/debug-types";
 import { pageId, peekPageId, trackEventSource } from "@/lib/page-debug";
 import type { TranslationParams } from "@/lib/i18n/types";
-import { AGENT_EVENT_HEARTBEAT_MS, isNestedToolExecutionEvent, isSystemMessageEvent } from "@/lib/agent-event-wire";
+import { AGENT_EVENT_HEARTBEAT_MS, isNestedToolExecutionEvent, isSystemMessageEvent, toolResultFromExecutionEnd } from "@/lib/agent-event-wire";
 import { runStatePhase } from "@/lib/chat-phase-label";
 import { getToolExecutionProgress } from "@/lib/tool-execution-progress";
 import { CODEMODE_TOOL_NAME, getCodemodeProgress } from "@/lib/codemode-view";
@@ -253,7 +254,8 @@ export interface UseAgentSessionOptions {
   onToolEnd?: (toolName: string) => void;
   onAttentionNeeded?: (request: BlockingExtensionUiRequest) => void;
   onSessionCreated?: (session: SessionInfo, sourceDraftKey: string) => void;
-  onSessionForked?: (newSessionId: string) => void;
+  /** A fork to open. `session` is its row when it may belong to another project (a fork into another folder). */
+  onSessionForked?: (newSessionId: string, session?: SessionInfo) => void;
   /** `/side`: a side chat was forked from this session; open its tab. The
    *  prompt argument, if any, seeds the new chat's composer. */
   onSideSession?: (session: SessionInfo, prompt: string | null) => void;
@@ -305,6 +307,20 @@ function asConcreteThinkingLevel(value?: string | null): ConcreteThinkingLevel |
 // Session id -> user entry being edited. ChatWindow remounts per session, so a
 // pending edit lives here as long as that session's in-memory draft does.
 const pendingHistoryEdits = new Map<string, string>();
+// The target lives only in this page, so its draft text is never stored: after
+// a reload the rewritten message would join the branch instead of forking it.
+const historyEditDraftHolds = new Map<string, () => void>();
+
+function setPendingHistoryEdit(sessionId: string, entryId: string | null): void {
+  if (entryId) {
+    pendingHistoryEdits.set(sessionId, entryId);
+    if (!historyEditDraftHolds.has(sessionId)) historyEditDraftHolds.set(sessionId, holdStoredDraft(sessionId));
+    return;
+  }
+  pendingHistoryEdits.delete(sessionId);
+  historyEditDraftHolds.get(sessionId)?.();
+  historyEditDraftHolds.delete(sessionId);
+}
 
 const PROMPT_SETTLE_INITIAL_DELAY_MS = 800;
 const PROMPT_SETTLE_POLL_MS = 600;
@@ -478,6 +494,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [entryIds, setEntryIds] = useState<string[]>([]);
   // Entry ids that took over a run's message keys when the file was read again (lib/message-keys.ts).
   const [messageKeyAliases, setMessageKeyAliases] = useState<ReadonlyMap<string, string>>(() => new Map());
+  // Entry ids of user messages sent during the run, for their "New session" only (withLiveUserEntryId()).
+  const [liveUserEntryIds, setLiveUserEntryIds] = useState<ReadonlyMap<AgentMessage, string>>(() => new Map());
   const [historyCursor, setHistoryCursor] = useState<string | null>(null);
   const [hasEarlierMessages, setHasEarlierMessages] = useState(false);
   const [earlierTurnCount, setEarlierTurnCount] = useState(0);
@@ -617,6 +635,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const startedSessionRef = useRef<{ model: SelectedModel | null; thinkingLevel: ConcreteThinkingLevel | null } | null>(null);
   const promptRunIdRef = useRef(0);
   const optimisticUserMessageKeyRef = useRef<string | null>(null);
+  // The optimistic bubble itself, set with its key.
+  const optimisticUserMessageRef = useRef<AgentMessage | null>(null);
+  // The last user message_end shown, until the wrapper's user_message_entry names its entry.
+  const deliveredUserMessageRef = useRef<DeliveredUserMessage | null>(null);
   // The run whose prompt the server is known to have got: one of its events
   // (agent_start, prompt_done, queue_update, its user message) arrived, maybe
   // before its request failed. Later ones clear the unconfirmed record itself.
@@ -772,13 +794,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // so cancelling or reloading never hides the rest of the conversation.
   const [editEntryId, setEditEntryId] = useState(() => {
     const sid = session?.id;
-    if (sid && !getDraft(sid)) pendingHistoryEdits.delete(sid);
+    if (sid && !getDraft(sid)) setPendingHistoryEdit(sid, null);
     return (sid && pendingHistoryEdits.get(sid)) || null;
   });
   const setEdit = useCallback((entryId: string | null) => {
     if (!session?.id) return;
-    if (entryId) pendingHistoryEdits.set(session.id, entryId);
-    else pendingHistoryEdits.delete(session.id);
+    setPendingHistoryEdit(session.id, entryId);
     setEditEntryId(entryId);
   }, [session?.id]);
   const handleEditContent = useCallback((message: UserMessage, entryId: string) => {
@@ -927,6 +948,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const previous = { messages: messagesRef.current, entryIds: entryIdsRef.current };
         const next = { messages: persistedMessages, entryIds: d.context.entryIds ?? [] };
         setMessageKeyAliases((aliases) => carryMessageKeys({ ...previous, aliases }, next));
+        // The read has their entry ids in `entryIds`.
+        setLiveUserEntryIds(new Map());
         setMessages(next.messages);
         setEntryIds(next.entryIds);
         setHistoryCursor(d.context.oldestEntryId);
@@ -2105,6 +2128,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
         break;
       }
+      case "user_message_entry": {
+        // The entry pi appended for the user message_end just before (#1746).
+        const delivered = deliveredUserMessageRef.current;
+        deliveredUserMessageRef.current = null;
+        setLiveUserEntryIds((ids) => withLiveUserEntryId(ids, delivered, event));
+        break;
+      }
       case "message_end": {
         // Same late-event guard: after reconcile finished this run,
         // loadSession already loaded this message from the session file —
@@ -2130,6 +2160,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           const deliveredKey = userMessageKey(delivered);
           const optimisticKey = optimisticUserMessageKeyRef.current;
           optimisticUserMessageKeyRef.current = null;
+          const bubble = optimisticKey === deliveredKey ? optimisticUserMessageRef.current : null;
+          deliveredUserMessageRef.current = { timestamp: delivered.timestamp, messages: bubble ? [bubble, delivered] : [delivered] };
           // While the run's own bubble waits, a delivered user message is its prompt.
           if (optimisticKey) markPromptLanded();
           setMessages((prev) => {
@@ -2148,6 +2180,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (completed.role === "toolResult") {
             const callId = (completed as ToolResultMessage).toolCallId;
             setToolClocks((prev) => withoutToolClock(prev, callId));
+            setActiveToolResults((prev) => {
+              if (!prev.has(callId)) return prev;
+              const next = new Map(prev);
+              next.delete(callId);
+              return next;
+            });
           }
           if (completed.role === "assistant") {
             const sid = sessionIdRef.current;
@@ -2219,10 +2257,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         onToolEnd?.(event.toolName as string);
         const endedAt = performance.now();
         setToolClocks((prev) => applyToolClockEvent(prev, event, endedAt));
+        const result = toolResultFromExecutionEnd(event);
         setActiveToolResults((prev) => {
-          if (!prev.has(id)) return prev;
+          if (!result && !prev.has(id)) return prev;
           const next = new Map(prev);
-          next.delete(id);
+          if (result) next.set(id, result);
+          else next.delete(id);
           return next;
         });
         setAgentPhase((prev) => {
@@ -2354,6 +2394,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const sameTextAfterSend = countUserMessages(messagesRef.current.slice(savedViewIds.length), userKey);
     setMessages((prev) => [...prev, userMsg]);
     optimisticUserMessageKeyRef.current = userKey;
+    optimisticUserMessageRef.current = userMsg;
     promptRunIdRef.current = promptRunId;
     agentRunningRef.current = true;
     setAgentRunning(true);
@@ -2600,6 +2641,38 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setForkingEntryId(null);
     }
   }, [addNotice, onSessionForked]);
+
+  /**
+   * pi's Fork for a session whose folder is gone (pi 1.5.2): the whole session
+   * copied into `cwd`, a folder that exists (POST /api/sessions/[id]/fork
+   * `{ cwd }`), then opened. The draft goes along, as the refused prompt was
+   * given back to it. Resolves to an error to show, or null.
+   */
+  const forkIntoCwd = useCallback(async (cwd: string): Promise<string | null> => {
+    const sid = sessionIdRef.current;
+    if (!sid) return translate("sidebar.forkNotFound");
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}/fork`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cwd }),
+      });
+      const data = await res.json().catch(() => ({})) as { sessionId?: string; session?: SessionInfo; code?: string; error?: string };
+      if (!res.ok || !data.sessionId || !data.session) {
+        const { key, params } = forkFailureMessage(data.code, data.error ?? `HTTP ${res.status}`);
+        return translate(key, params);
+      }
+      const input = opts.chatInputRef?.current;
+      if (input) input.rekeyDraft(sid, data.sessionId);
+      else rekeyDraft(sid, data.sessionId);
+      onSessionForked?.(data.sessionId, data.session);
+      return null;
+    } catch (e) {
+      return translate("sidebar.forkFailed", { error: e instanceof Error ? e.message : String(e) });
+    }
+  }, [onSessionForked, opts.chatInputRef, translate]);
+  const canForkMissingCwd = Boolean(missingCwd) && !isNew && Boolean(session?.id)
+    && session?.relation?.kind !== "subagent" && session?.relation?.kind !== "side";
 
   const handleNavigate = useCallback(async (entryId: string): Promise<boolean> => {
     if (bashRunningRef.current) return false;
@@ -3686,8 +3759,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   return {
     // State
-    data, loading, error, activeLeafId, messages, activeToolResults, toolClocks, entryIds, messageKeys, historyCursor, hasEarlierMessages, earlierTurnCount, streamingStore,
-    agentRunning, modelNames, modelList, modelError, missingCwd, modelScopeWarnings, isModelScopeActive, allModelList, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel,
+    data, loading, error, activeLeafId, messages, activeToolResults, toolClocks, entryIds, messageKeys, liveUserEntryIds, historyCursor, hasEarlierMessages, earlierTurnCount, streamingStore,
+    agentRunning, modelNames, modelList, modelError, missingCwd, canForkMissingCwd, modelScopeWarnings, isModelScopeActive, allModelList, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel,
     retryInfo, contextUsage, systemPrompt, forkingEntryId,
     isCompacting, compactError, compactResult, currentModel, displayModel, modelSwitching, sessionStats, autoCompactionEnabled,
     slashCommands, slashCommandsLoading, queuedMessages,
@@ -3704,7 +3777,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     sessionIdRef, scrollContainerRef,
     lastUserMsgRef, pendingScrollToUserRef, initialScrollDoneRef,
     // Actions
-    handleSend, handleAbort, startSideChat, handleFork, handleNavigate, handleModelChange,
+    handleSend, handleAbort, startSideChat, handleFork, forkIntoCwd, handleNavigate, handleModelChange,
     handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     dismissCompactError,
     handleRecallQueue,

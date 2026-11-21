@@ -89,6 +89,11 @@ type StoredSubagentExecution = {
   abortRequested: boolean;
   /** Set once the turn limit ends the run; later steering is refused instead of starting another turn. */
   turnLimitReached?: boolean;
+  /**
+   * Set once the run has used its turns (`turnCount >= max_turns`): a report steered in from here
+   * would buy a turn past the limit, and the limiter could then fail a run that had finished.
+   */
+  turnsUsed?: boolean;
   cancelQueued?: () => boolean;
   /** Ends the wait for the child's MCP servers before its prompt (`prepareChildMcp()`). */
   mcpWait?: AbortController;
@@ -139,10 +144,122 @@ function lastAssistantStop(sessionManager: { getEntries?: () => unknown }): { ab
   return undefined;
 }
 
+type RunMessage = { role?: unknown; stopReason?: unknown; content?: unknown };
+
+function messageText(message: RunMessage): string {
+  if (!Array.isArray(message.content)) return typeof message.content === "string" ? message.content.trim() : "";
+  return message.content
+    .map((block: { type?: unknown; text?: unknown }) => (block?.type === "text" && typeof block.text === "string" ? block.text : ""))
+    .join("").trim();
+}
+
+type RunEntry = { type?: unknown; id?: unknown; targetId?: unknown; replacement?: { content?: unknown } | null; message?: RunMessage };
+
+/**
+ * A run's report: the text of every assistant message the run appended (entries from `from` on)
+ * that ended its turn without tool calls, in order. A steer that reaches the child while it writes
+ * its answer starts another turn after it, and that turn's reply (often a short acknowledgement)
+ * alone would replace the report (#1726). Messages are read as pi projects them for the model: a
+ * `context_edit` with no replacement drops one (pi's own recovery omits a provider error before
+ * its retry and a `length`-truncated draft before its compaction retry), and one with a
+ * replacement rewrites its content, the latest edit winning. The run's last message counts
+ * however it ended, as `getLastAssistantText()` reads it, so a stopped or limited run keeps its
+ * partial output. The session's entries are append-only, so compaction during the run keeps
+ * earlier answers, and a resumed run never reports an earlier run's text.
+ */
+function runResultText(sessionManager: { getEntries?: () => unknown }, from: number): string | undefined {
+  const entries = sessionManager.getEntries?.();
+  if (!Array.isArray(entries)) return undefined;
+  const runEntries = (entries as RunEntry[]).slice(from);
+  // An edit always follows its target, so the run's own range holds every edit of its messages.
+  const edits = new Map<unknown, RunEntry["replacement"]>();
+  for (const entry of runEntries) if (entry?.type === "context_edit") edits.set(entry.targetId, entry.replacement);
+  const messages = runEntries.flatMap((entry): RunMessage[] => {
+    if (entry?.type !== "message" || entry.message?.role !== "assistant") return [];
+    if (!edits.has(entry.id)) return [entry.message];
+    const replacement = edits.get(entry.id);
+    if (!replacement) return [];
+    const content = typeof replacement.content === "string" ? [{ type: "text", text: replacement.content }] : replacement.content;
+    return [{ ...entry.message, content }];
+  });
+  let last = messages.length - 1;
+  // `getLastAssistantText()` passes over a request stopped before any output.
+  while (last >= 0 && messages[last].stopReason === "aborted" && Array.isArray(messages[last].content) &&
+    (messages[last].content as unknown[]).length === 0) last -= 1;
+  const texts = messages.flatMap((message, index) => {
+    const answer = index === last || (message.stopReason !== "error" && message.stopReason !== "aborted" &&
+      !(Array.isArray(message.content) && message.content.some((block: { type?: unknown }) => block?.type === "toolCall")));
+    const text = answer ? messageText(message) : "";
+    return text ? [text] : [];
+  });
+  return texts.length ? texts.join("\n\n") : undefined;
+}
+
 function turnLimitError(turnLimit: number, undelivered: readonly string[]): string {
   const error = `Subagent reached its turn limit (${turnLimit}) without completing the task.`;
   if (undelivered.length === 0) return error;
   return `${error} These queued messages were not delivered:\n${undelivered.map((text) => `- ${text}`).join("\n")}`;
+}
+
+type TurnLimitedSession = Awaited<ReturnType<typeof createAgentSessionFromServices>>["session"];
+
+/**
+ * Holds a run to the profile's `max_turns` through the SDK's awaited `finishTurn` hook: one
+ * wrap-up turn when the SDK would otherwise continue, then `end`. Every run, a `resume`
+ * included, counts from zero. Returns undefined with no limit; `restore()` undoes the hooks.
+ */
+function installTurnLimiter(
+  inner: TurnLimitedSession,
+  stored: StoredSubagentExecution,
+  turnLimit: number | undefined,
+): { error(): string | undefined; restore(): void } | undefined {
+  if (!turnLimit) return undefined;
+  let turnCount = 0;
+  let maxTurnsReached = false;
+  let undelivered: string[] = [];
+  const previousFinishTurn = inner.agent.finishTurn;
+  const previousSteeringMode = inner.agent.steeringMode;
+  // Finalized events retain the SDK's terminate hint; tool-result messages do not.
+  const terminatingTools = new Set<string>();
+  const unsubscribeTools = inner.subscribe((event) => {
+    if (event.type === "tool_execution_end" && event.result?.terminate === true) {
+      terminatingTools.add(event.toolCallId);
+    }
+  });
+  inner.agent.finishTurn = async (turn, signal) => {
+    const decision = (await previousFinishTurn?.(turn, signal)) ?? undefined;
+    const toolsContinue = turn.toolResults.some((message) => !terminatingTools.has(message.toolCallId));
+    terminatingTools.clear();
+    turnCount += 1;
+    if (turnCount >= turnLimit) stored.turnsUsed = true;
+    if (signal?.aborted || decision?.action === "end" ||
+      turn.message.stopReason === "error" || turn.message.stopReason === "aborted") return decision;
+    const needsAnotherTurn = toolsContinue || decision?.action === "continue" || inner.agent.hasQueuedMessages();
+    if (!needsAnotherTurn || turnCount < turnLimit) return decision;
+    if (turnCount >= turnLimit + 1) {
+      maxTurnsReached = true;
+      stored.turnLimitReached = true;
+      // AgentSession starts another run for anything still queued, past an `end`
+      // decision, so the limit holds only once the queues are empty.
+      const { steering, followUp } = inner.clearQueue();
+      undelivered = [...undelivered, ...steering, ...followUp];
+      return { action: "end" };
+    }
+    // The awaited SDK boundary delivers the instruction before the wrap-up request.
+    // In one-at-a-time mode a steer queued earlier would take the wrap-up turn and
+    // leave the instruction for later, so that turn takes everything queued.
+    inner.agent.steeringMode = "all";
+    await inner.steer(TURN_LIMIT_INSTRUCTION);
+    return decision;
+  };
+  return {
+    error: () => (maxTurnsReached ? turnLimitError(turnLimit, undelivered) : undefined),
+    restore: () => {
+      inner.agent.finishTurn = previousFinishTurn;
+      inner.agent.steeringMode = previousSteeringMode;
+      unsubscribeTools();
+    },
+  };
 }
 
 /**
@@ -184,8 +301,9 @@ function dropSubagentRun(sessionId: string, stored: StoredSubagentExecution): bo
 
 /**
  * Runs whose completion `notifyParent()` is still delivering: the run has left the
- * run map, but the parent's turn starts only once the parent is ready and idle. An entry leaves
- * as soon as that turn starts, since the parent is running from then on.
+ * run map, but the report reaches the parent only at its next turn boundary, or once it is ready
+ * and idle. An entry leaves as soon as a parent run has taken the report (steered in) or the turn
+ * it starts is under way, since that run then stands for it.
  */
 function getParentNotifications(): Set<ParentNotification> {
   globalThis.__piSubagentParentNotifications ??= new Set();
@@ -208,8 +326,8 @@ function unsettledSubagentRuns(): ParentNotification[] {
 /**
  * Whether a subagent run under this session, at any depth, is still unsettled: its end can
  * start a turn there (`notifyParent()`, `triggerTurn`). A run counts from dispatch until its
- * result is written (the run map), then until the turn its parent notification triggers starts,
- * or the delivery is dropped or fails. A hidden page keeps the session's event stream while this
+ * result is written (the run map), then until its parent notification is steered into a running
+ * parent or starts a turn there, or the delivery is dropped or fails. A hidden page keeps the session's event stream while this
  * holds (#1283), and a main session's run that ends meanwhile announces no completion: the
  * turn a report starts decides that (#1434).
  */
@@ -307,6 +425,41 @@ function takeResultConsumed(run: SubagentRunIdentity): boolean {
   return true;
 }
 
+const PARENT_NOTIFICATION_TYPE = "pi-web:subagent-notification";
+
+function parentNotificationMessage(run: SubagentRunInfo) {
+  return {
+    customType: PARENT_NOTIFICATION_TYPE,
+    content: subagentNotificationText(run),
+    display: true,
+    details: subagentToolDetails(run),
+  };
+}
+
+/** The parent's copy of this run's notification: the details name the run, as the consumed mark does. */
+function isParentNotificationFor(message: unknown, run: SubagentRunIdentity): boolean {
+  const candidate = message as { role?: unknown; customType?: unknown; details?: { sessionId?: unknown; completedAt?: unknown } } | undefined;
+  return candidate?.role === "custom" && candidate.customType === PARENT_NOTIFICATION_TYPE
+    && candidate.details?.sessionId === run.sessionId && candidate.details.completedAt === run.completedAt;
+}
+
+/**
+ * Whether pi takes a steer queued at this `turn_end` before the parent's next model call. It
+ * does not after an error or aborted response, which end the run, or once Stop aborted it; nor
+ * into a parent that is itself a subagent and has used its turns (`max_turns`): a steer there
+ * would start a turn past the limit, or make AgentSession run again after the limiter's `end`,
+ * and a run that answered could end as failed. An earlier queued message goes first in
+ * the `one-at-a-time` steering mode, so the report waits for a turn whose queue is empty.
+ */
+function canSteerAfterTurn(parent: HostSession, parentSessionId: string, message: unknown): boolean {
+  const stopReason = (message as { stopReason?: unknown } | undefined)?.stopReason;
+  if (stopReason === "error" || stopReason === "aborted") return false;
+  if (parent.inner.agent.signal?.aborted) return false;
+  if (parent.inner.agent.hasQueuedMessages()) return false;
+  const stored = getSubagentRuns().get(parentSessionId);
+  return stored?.turnLimitReached !== true && stored?.turnsUsed !== true;
+}
+
 /**
  * A run lives in `getSubagentRuns()` from dispatch until its result entry is written, so a
  * persisted `running` / `queued` status reaching `get()` without that entry (and without a running
@@ -325,7 +478,10 @@ export function getLiveSubagentStatus(sessionId: string): SubagentRunInfo["statu
 
 function findSubagentModel(runtime: ModelRuntime, reference: string) {
   const slash = reference.indexOf("/");
-  if (slash > 0) return runtime.getModel(reference.slice(0, slash), reference.slice(slash + 1));
+  // `provider/modelId` is a hint, as in pi's `--model`: the whole text may also be one provider's
+  // own id that contains a slash (`zai/glm-5` on a gateway, OpenRouter's `anthropic/...` ids).
+  const named = slash > 0 ? runtime.getModel(reference.slice(0, slash), reference.slice(slash + 1)) : undefined;
+  if (named) return named;
   const matches = runtime.getModels().filter((model) => model.id === reference);
   if (matches.length > 1) throw new Error(`Subagent model is ambiguous; use provider/modelId: ${reference}`);
   return matches[0];
@@ -336,7 +492,7 @@ function findSubagentModel(runtime: ModelRuntime, reference: string) {
  * followed by `:<thinking level>`. The whole reference is tried first, so an id that itself
  * contains a colon (`qwen3:8b`) still matches; a suffix that is no thinking level never matches.
  */
-function parseSubagentModel(runtime: ModelRuntime, value: string | undefined) {
+export function parseSubagentModel(runtime: ModelRuntime, value: string | undefined) {
   if (!value?.trim()) return undefined;
   const requested = value.trim();
   const exact = findSubagentModel(runtime, requested);
@@ -688,56 +844,17 @@ export function createSubagentController(
         sessionManager.appendCustomEntry(SUBAGENT_STATUS_TYPE, { version: 1, status: "running" });
         request.onUpdate?.(stored.run);
         dependencies.invalidateSessionList();
-        let turnCount = 0;
-        let maxTurnsReached = false;
-        let undelivered: string[] = [];
-        const previousFinishTurn = inner.agent.finishTurn;
-        const previousSteeringMode = inner.agent.steeringMode;
-        let unsubscribeTools: (() => void) | undefined;
-        if (turnLimit) {
-          // Finalized events retain the SDK's terminate hint; tool-result messages do not.
-          const terminatingTools = new Set<string>();
-          unsubscribeTools = inner.subscribe((event) => {
-            if (event.type === "tool_execution_end" && event.result?.terminate === true) {
-              terminatingTools.add(event.toolCallId);
-            }
-          });
-          inner.agent.finishTurn = async (turn, signal) => {
-            const decision = (await previousFinishTurn?.(turn, signal)) ?? undefined;
-            const toolsContinue = turn.toolResults.some((message) => !terminatingTools.has(message.toolCallId));
-            terminatingTools.clear();
-            turnCount += 1;
-            if (signal?.aborted || decision?.action === "end" ||
-              turn.message.stopReason === "error" || turn.message.stopReason === "aborted") return decision;
-            const needsAnotherTurn = toolsContinue || decision?.action === "continue" || inner.agent.hasQueuedMessages();
-            if (!needsAnotherTurn || turnCount < turnLimit) return decision;
-            if (turnCount >= turnLimit + 1) {
-              maxTurnsReached = true;
-              stored.turnLimitReached = true;
-              // AgentSession starts another run for anything still queued, past an `end`
-              // decision, so the limit holds only once the queues are empty.
-              const { steering, followUp } = inner.clearQueue();
-              undelivered = [...undelivered, ...steering, ...followUp];
-              return { action: "end" };
-            }
-            // The awaited SDK boundary delivers the instruction before the wrap-up request.
-            // In one-at-a-time mode a steer queued earlier would take the wrap-up turn and
-            // leave the instruction for later, so that turn takes everything queued.
-            inner.agent.steeringMode = "all";
-            await inner.steer(TURN_LIMIT_INSTRUCTION);
-            return decision;
-          };
-        }
+        const limiter = installTurnLimiter(inner, stored, turnLimit);
         let result: SubagentRunInfo;
+        const runStart = sessionManager.getEntries().length;
         try {
           if (childSession && !childSession.isAlive()) throw new Error(CLOSED_BEFORE_RUN);
           await prepareChildMcp(childSession, stored);
           await inner.prompt(delegatedTask, { source: "rpc" });
-          const text = inner.getLastAssistantText()?.trim();
+          const text = runResultText(sessionManager, runStart);
           const stop = stored.abortRequested ? undefined : lastAssistantStop(sessionManager);
           const aborted = stored.abortRequested || stop?.aborted === true;
-          const errorMessage = aborted ? undefined : stop?.error ??
-            (maxTurnsReached && turnLimit ? turnLimitError(turnLimit, undelivered) : undefined);
+          const errorMessage = aborted ? undefined : stop?.error ?? limiter?.error();
           result = {
             ...initialRun,
             status: aborted ? "aborted" : errorMessage ? "failed" : "completed",
@@ -746,7 +863,7 @@ export function createSubagentController(
             ...(errorMessage ? { error: errorMessage } : {}),
           };
         } catch (error) {
-          const text = inner.getLastAssistantText()?.trim();
+          const text = runResultText(sessionManager, runStart);
           const aborted = stored.abortRequested || request.signal?.aborted;
           result = {
             ...initialRun,
@@ -758,11 +875,7 @@ export function createSubagentController(
               : {}),
           };
         } finally {
-          if (turnLimit) {
-            inner.agent.finishTurn = previousFinishTurn;
-            inner.agent.steeringMode = previousSteeringMode;
-          }
-          unsubscribeTools?.();
+          limiter?.restore();
           request.signal?.removeEventListener("abort", handleParentAbort);
         }
 
@@ -874,6 +987,12 @@ export function createSubagentController(
       resumed: true,
     };
     const manager = wrapper.inner.sessionManager;
+    // A spawn names the child after its description; a resume with a new one renames it (#1735),
+    // through `setSessionName()` as pi's `/name` does, since the wrapper holds the session.
+    const resumedDescription = request.description.trim();
+    if (resumedDescription && resumedDescription !== manager.getSessionName()) {
+      wrapper.inner.setSessionName(resumedDescription);
+    }
     let resolveCompletion!: (run: SubagentRunInfo) => void;
     const completion = new Promise<SubagentRunInfo>((resolve) => { resolveCompletion = resolve; });
     const stored: StoredSubagentExecution = { run: initialRun, completion, abortRequested: false, dispatchedAt: Date.now() };
@@ -903,29 +1022,40 @@ export function createSubagentController(
       manager.appendCustomEntry(SUBAGENT_STATUS_TYPE, { version: 1, status: "running" });
       request.onUpdate?.(stored.run);
       let result: SubagentRunInfo;
+      // Earlier runs' messages are on the same branch; only this run's answers are its result.
+      const runStart = manager.getEntries().length;
+      // The profile's turn limit holds for a resumed run as for the first, from zero again.
+      const limiter = installTurnLimiter(
+        wrapper!.inner as unknown as TurnLimitedSession,
+        stored,
+        resolveSubagentProfile(parent.cwd, existing.profile)?.maxTurns,
+      );
       try {
         if (!wrapper!.isAlive()) throw new Error(CLOSED_BEFORE_RUN);
         await prepareChildMcp(wrapper, stored);
         await wrapper!.inner.prompt(request.task, { source: "rpc" });
-        const text = wrapper!.inner.getLastAssistantText()?.trim();
+        const text = runResultText(manager, runStart);
         const stop = stored.abortRequested ? undefined : lastAssistantStop(manager);
         const aborted = stored.abortRequested || stop?.aborted === true;
-        const providerError = aborted ? undefined : stop?.error;
+        const errorMessage = aborted ? undefined : stop?.error ?? limiter?.error();
         result = {
           ...initialRun,
-          status: aborted ? "aborted" : providerError ? "failed" : "completed",
+          status: aborted ? "aborted" : errorMessage ? "failed" : "completed",
           completedAt: new Date().toISOString(),
           ...(text ? { result: text } : {}),
-          ...(providerError ? { error: providerError } : {}),
+          ...(errorMessage ? { error: errorMessage } : {}),
         };
       } catch (error) {
+        const text = runResultText(manager, runStart);
         result = {
           ...initialRun,
           status: stored.abortRequested || request.signal?.aborted ? "aborted" : "failed",
           completedAt: new Date().toISOString(),
+          ...(text ? { result: text } : {}),
           ...(!stored.abortRequested && !request.signal?.aborted ? { error: error instanceof Error ? error.message : String(error) } : {}),
         };
       } finally {
+        limiter?.restore();
         request.signal?.removeEventListener("abort", handleParentAbort);
       }
       result = recordResult(manager, result);
@@ -1025,26 +1155,60 @@ export function createSubagentController(
       parent = await dependencies.reopenSession(run.parentSessionId, sessionFile);
     }
     await parent.waitUntilReady();
-    // The parent may still be inside the `get_subagent_result` call that collects this result,
-    // and `deliverAs: "followUp"` would only queue the message until that turn ends anyway.
-    // Hold the notification until the parent is idle and re-check the mark, so a result the
-    // parent already consumed never triggers a duplicate turn.
+    // A running parent takes the report into its current run (`steerIntoRun()`); one whose run
+    // ends before the report got in is woken below once idle, as an idle parent is at once.
     while (parent.isAlive() && parent.isRunning()) {
-      if (takeResultConsumed(run)) return;
-      await new Promise<void>((resolve) => { setTimeout(resolve, PARENT_IDLE_POLL_MS); });
+      const outcome = await steerIntoRun(parent, run);
+      if (outcome === "consumed") return;
+      // The parent's run stands for this result from here: its end must not see it as pending.
+      if (outcome === "delivered") return onTurnStarted();
     }
     if (takeResultConsumed(run)) return;
     if (!parent.isAlive()) throw new Error(`Parent session is no longer available: ${run.parentSessionId}`);
-    const delivery = parent.inner.sendCustomMessage({
-      customType: "pi-web:subagent-notification",
-      content: subagentNotificationText(run),
-      display: true,
-      details: subagentToolDetails(run),
-    }, { deliverAs: "followUp", triggerTurn: true });
+    const delivery = parent.inner.sendCustomMessage(parentNotificationMessage(run), { deliverAs: "followUp", triggerTurn: true });
     // pi starts the turn before its first await, and resolves only once that turn settled. From
     // here the parent's own run stands for this result: its end must not see the result as pending.
     if (parent.isRunning()) onTurnStarted();
     await delivery;
+  }
+
+  /**
+   * Hand the report to a running parent as a steer, so its next model call in this run sees it.
+   * The steer is queued only at a turn boundary (`turn_end`, after the tool batch), when pi polls
+   * steering right away: a `get_subagent_result` call in that batch has returned and marked the
+   * result consumed by then, so the parent never gets the report twice, and no Stop or
+   * `clear_queue` can drop the queued message unseen. It is a custom message, which pi keeps out of
+   * the composer's queue rows (they list steer texts), so it is never recalled as the user's text.
+   * Resolves `delivered` once pi put it into the parent's context, `consumed` when the parent
+   * collected the result itself, and `idle` when the run ended before the report got in (Stop,
+   * an error, the report arriving after the run's last turn): the caller then wakes the parent.
+   */
+  function steerIntoRun(parent: HostSession, run: SubagentRunInfo): Promise<"delivered" | "consumed" | "idle"> {
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (outcome: "delivered" | "consumed" | "idle") => {
+        if (settled) return;
+        settled = true;
+        clearInterval(idleCheck);
+        // pi's emit loop walks its listener array, which unsubscribing splices: leaving inside the
+        // handler would make the next listener (another child's report) miss this event.
+        queueMicrotask(unsubscribe);
+        resolve(outcome);
+      };
+      const unsubscribe = parent.inner.subscribe((event) => {
+        if (settled) return;
+        if (event.type === "message_end" && isParentNotificationFor(event.message, run)) return finish("delivered");
+        if (event.type !== "turn_end") return;
+        if (takeResultConsumed(run)) return finish("consumed");
+        if (!canSteerAfterTurn(parent, run.parentSessionId, event.message)) return;
+        parent.inner.sendCustomMessage(parentNotificationMessage(run), { deliverAs: "steer" }).catch((error) => {
+          console.error("[pi-web] failed to steer subagent completion:", error instanceof Error ? error.message : error);
+        });
+      });
+      const idleCheck = setInterval(() => {
+        if (!parent.isAlive() || !parent.isRunning()) finish("idle");
+      }, PARENT_IDLE_POLL_MS);
+    });
   }
 
   async function abort(sessionId: string): Promise<void> {

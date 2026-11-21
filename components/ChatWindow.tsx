@@ -3,7 +3,6 @@ import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
 import { isHiddenRelation, SIDE_BOUNDARY_MESSAGE_TYPE } from "@/lib/session-family";
 import Image from "next/image";
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { createPortal } from "react-dom";
 import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, BlockingExtensionUiRequest, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage, UserMessage } from "@/lib/types";
 import { normalizeCustomPanelLines, stripAnsi } from "@/lib/ansi";
 import { splitNoticeLinks, splitNoticeText } from "@/lib/notice-text";
@@ -13,13 +12,14 @@ import { collapsesProcessDetails, countToolCallBlocks, getDisplayableAssistantBl
 import { extractTurnWrittenFiles, type WrittenFile } from "@/lib/turn-written-files";
 import { getFinalAnswerViews, keepWrittenFiles, type FinalAnswerViews } from "@/lib/turn-views";
 import { formatTurnDuration, getTurnDurationMs } from "@/lib/turn-duration";
-import { buildQuotedSelection } from "@/lib/quoted-selection";
 import { dropMentionText, splitDroppedItems, uploadFiles, type DroppedItem } from "@/lib/file-upload-client";
 import { MessageView } from "./MessageView";
 import { MarkdownBody } from "./MarkdownBody";
 import { ChatInput, getUserMessageDraftImages, getUserMessageText, type ChatInputHandle } from "./ChatInput";
+import { DirectoryPicker } from "./DirectoryPicker";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { TRAJECTORY_PANEL_ID, TRAJECTORY_TAB_ID } from "./ChatViewTabs";
+import { QuoteSelectionPopover } from "./QuoteSelectionPopover";
 import { ExtensionStatusBar } from "./ExtensionStatusBar";
 import { HotkeysDialog } from "./HotkeysDialog";
 import { ImportSessionDialog } from "./ImportSessionDialog";
@@ -31,9 +31,11 @@ import { phaseLabel } from "@/lib/chat-phase-label";
 import { useAgentSession, type AgentEndInfo, type NewSessionChoices, type NoticeItem } from "@/hooks/useAgentSession";
 import { selectHasStreamingContent, selectIsStreaming, selectStreamingMessage, useStreamingSelector } from "@/hooks/useStreamingSelector";
 import type { StreamingStore } from "@/lib/streaming-message";
+import { streamRateKey } from "@/lib/stream-token-rate";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useScrollbarVisibility } from "@/hooks/useScrollbarVisibility";
+import { useSkipOffscreenRows } from "@/hooks/useSkipOffscreenRows";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { DebugClientSession } from "@/lib/debug-types";
 import type { AppUpdateResponse } from "@/lib/api-types";
@@ -75,7 +77,7 @@ interface Props {
   onToolEnd?: (toolName: string) => void;
   onAttentionNeeded?: (request: BlockingExtensionUiRequest) => void;
   onSessionCreated?: (session: SessionInfo, sourceDraftKey: string) => void;
-  onSessionForked?: (newSessionId: string) => void;
+  onSessionForked?: (newSessionId: string, session?: SessionInfo) => void;
   /** A subagent's or side chat's tab beside the main chat: the page's global shortcuts stay with the main chat. */
   panel?: boolean;
   /** `/side`: a side chat was forked from this session; open its tab. */
@@ -313,8 +315,8 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
   const openImportDialog = useCallback((initialPath?: string) => setImportDialogState({ open: true, initialPath }), []);
 
   const {
-    loading, error, messages, activeToolResults, toolClocks, entryIds, messageKeys, historyCursor, hasEarlierMessages, earlierTurnCount, streamingStore,
-    agentRunning, bashRunning, pendingBash, modelNames, modelList, modelError, missingCwd, modelScopeWarnings, isModelScopeActive, allModelList, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel,
+    loading, error, messages, activeToolResults, toolClocks, entryIds, messageKeys, liveUserEntryIds, historyCursor, hasEarlierMessages, earlierTurnCount, streamingStore,
+    agentRunning, bashRunning, pendingBash, modelNames, modelList, modelError, missingCwd, canForkMissingCwd, modelScopeWarnings, isModelScopeActive, allModelList, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel,
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactError, compactResult, displayModel: displayModelValue, modelSwitching, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
@@ -328,7 +330,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     showScrollToBottom,
     sessionIdRef, scrollContainerRef,
     lastUserMsgRef, promptAnchorActive,
-    handleSend, handleAbort, startSideChat, handleFork, handleEditContent, cancelEdit, handleModelChange,
+    handleSend, handleAbort, startSideChat, handleFork, forkIntoCwd, handleEditContent, cancelEdit, handleModelChange,
     handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     dismissCompactError,
     handleRecallQueue,
@@ -357,129 +359,25 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     if (!agentRunning || !holdAudio) return;
     return holdAudio();
   }, [agentRunning, holdAudio]);
-  const [quotedSelection, setQuotedSelection] = useState<{
-    text: string;
-    top: number;
-    left: number;
-  } | null>(null);
-  const [quoteInputOpen, setQuoteInputOpen] = useState(false);
-  const [quoteSubmitting, setQuoteSubmitting] = useState(false);
-  const [quoteError, setQuoteError] = useState<string | null>(null);
-  const quotePopoverRef = useRef<HTMLDivElement | null>(null);
-  const quoteChatInputRef = useRef<ChatInputHandle | null>(null);
-  // 迷你图轨道的图层（聊天区右缘的整高槽，见下面的槽元素）；放进 state，槽一挂上
+// 迷你图轨道的图层（聊天区右缘的整高槽，见下面的槽元素）；放进 state，槽一挂上
   // ChatMinimap 就能把轨道 portal 进去。
   const [minimapSlot, setMinimapSlot] = useState<HTMLDivElement | null>(null);
-  const closeQuotedSelection = useCallback(() => {
-    setQuotedSelection(null);
-    setQuoteInputOpen(false);
-    setQuoteError(null);
+  // The folder picker of the missing-folder banner's Fork, and its refusal.
+  const [forkPickerOpen, setForkPickerOpen] = useState(false);
+  const [forkPickerBusy, setForkPickerBusy] = useState(false);
+  const [forkPickerError, setForkPickerError] = useState<string | null>(null);
+  const openForkPicker = useCallback(() => {
+    setForkPickerError(null);
+    setForkPickerOpen(true);
   }, []);
-
-  useEffect(() => {
-    if (!quoteSelectionEnabled) closeQuotedSelection();
-  }, [quoteSelectionEnabled, closeQuotedSelection]);
-
-  const captureQuotedSelection = useCallback(() => {
-    if (!quoteSelectionEnabled || quoteInputOpen) return;
-    const selection = window.getSelection();
-    const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
-    const root = messageContentRef.current;
-    if (!selection || selection.isCollapsed || !range || !root || !root.contains(range.commonAncestorContainer)) {
-      setQuotedSelection(null);
-      return;
-    }
-    const text = selection.toString().trim();
-    if (!text) {
-      setQuotedSelection(null);
-      return;
-    }
-    const rect = range.getBoundingClientRect();
-    setQuotedSelection({
-      text,
-      top: Math.min(window.innerHeight - 44, rect.bottom + 8),
-      left: Math.max(64, Math.min(window.innerWidth - 64, rect.left + rect.width / 2)),
-    });
-  }, [quoteSelectionEnabled, quoteInputOpen]);
-
-  useEffect(() => {
-    if (!quoteInputOpen || !quotedSelection) return;
-    quoteChatInputRef.current?.insertIfEmpty(buildQuotedSelection(quotedSelection.text));
-  }, [quoteInputOpen, quotedSelection]);
-
-  useLayoutEffect(() => {
-    const popover = quotePopoverRef.current;
-    if (!popover || !quotedSelection) return;
-    const viewport = window.visualViewport;
-    const position = () => {
-      const rect = popover.getBoundingClientRect();
-      const top = viewport?.offsetTop ?? 0;
-      const left = viewport?.offsetLeft ?? 0;
-      popover.style.top = `${Math.max(top + 8, Math.min(quotedSelection.top, top + (viewport?.height ?? window.innerHeight) - rect.height - 8))}px`;
-      popover.style.left = `${Math.max(left + 8, Math.min(quotedSelection.left - rect.width / 2, left + (viewport?.width ?? window.innerWidth) - rect.width - 8))}px`;
-    };
-    position();
-    const observer = new ResizeObserver(position);
-    observer.observe(popover);
-    window.addEventListener("resize", position);
-    viewport?.addEventListener("resize", position);
-    viewport?.addEventListener("scroll", position);
-    return () => {
-      observer.disconnect();
-      window.removeEventListener("resize", position);
-      viewport?.removeEventListener("resize", position);
-      viewport?.removeEventListener("scroll", position);
-    };
-  }, [quotedSelection, quoteInputOpen, quoteError]);
-
-  useEffect(() => {
-    if (!quotedSelection) return;
-    const onPointerDown = (event: PointerEvent) => {
-      if (!quoteInputOpen && !quotePopoverRef.current?.contains(event.target as Node)) closeQuotedSelection();
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || event.isComposing) return;
-      event.preventDefault();
-      event.stopPropagation();
-      if (!quoteSubmitting) closeQuotedSelection();
-    };
-    document.addEventListener("pointerdown", onPointerDown);
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("pointerdown", onPointerDown);
-      document.removeEventListener("keydown", onKeyDown);
-    };
-  }, [quotedSelection, quoteInputOpen, quoteSubmitting, closeQuotedSelection]);
-
-  const quoteSelectionHere = useCallback(() => {
-    if (!quotedSelection) return;
-    chatInputRef?.current?.insertQuote(buildQuotedSelection(quotedSelection.text));
-    // No `removeAllRanges()` here: inserting focuses the composer, and that
-    // focus already collapses the page's selection. Calling it afterwards also
-    // clears the composer's own selection and drops its caret to offset 0
-    // (#1319), so the quote would be typed in front of instead of after.
-    closeQuotedSelection();
-  }, [chatInputRef, quotedSelection, closeQuotedSelection]);
-
-  const askSelectionInSideChat = useCallback(async (prompt: string) => {
-    if (quoteSubmitting || !prompt.trim() || !quotedSelection) return;
-    setQuoteSubmitting(true);
-    setQuoteError(null);
-    try {
-      const refusal = await startSideChat(prompt, quotedSelection.text);
-      if (!refusal) {
-        closeQuotedSelection();
-        return;
-      }
-      quoteChatInputRef.current?.restoreSubmission(prompt);
-      setQuoteError(refusal);
-    } catch (error) {
-      quoteChatInputRef.current?.restoreSubmission(prompt);
-      setQuoteError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setQuoteSubmitting(false);
-    }
-  }, [quotedSelection, quoteSubmitting, closeQuotedSelection, startSideChat]);
+  const handleForkPick = useCallback(async (cwd: string) => {
+    setForkPickerError(null);
+    setForkPickerBusy(true);
+    const error = await forkIntoCwd(cwd);
+    setForkPickerBusy(false);
+    if (error) setForkPickerError(error);
+    else setForkPickerOpen(false);
+  }, [forkIntoCwd]);
 
   // The composer's Side chat button: its draft goes back on a refusal, as a failed send's does.
   const askInSideChat = useCallback(async (message: string) => {
@@ -524,6 +422,10 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
   // finished turn regrouped into more rows), and must get an observer then.
   const [sentinel, setSentinel] = useState<HTMLDivElement | null>(null);
   const messageContentRef = useRef<HTMLDivElement | null>(null);
+  // The transcript's rows, each a direct child: the scroll position is kept by
+  // one of them, and rows far off screen skip layout (useSkipOffscreenRows).
+  const transcriptRowsRef = useRef<HTMLElement | null>(null);
+  const attachTranscriptRows = useSkipOffscreenRows(transcriptRowsRef);
   const prevScrollDistanceRef = useRef<number | null>(null);
   const loadingOlderRef = useRef(false);
   const restoreStartedRef = useRef(false);
@@ -557,8 +459,8 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
   useLayoutEffect(() => {
     const sessionId = session?.id;
     const container = scrollContainerRef.current;
-    const content = messageContentRef.current;
-    if (!sessionId || !onScrollPositionChange || !container || !content) return;
+    const rows = transcriptRowsRef.current;
+    if (!sessionId || !onScrollPositionChange || !container || !rows) return;
     return () => {
       if (pendingScrollRestoreRef.current) return;
       if (isScrollAtTail(container.scrollTop, container.clientHeight, container.scrollHeight)) {
@@ -566,7 +468,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
         return;
       }
       const viewportTop = container.getBoundingClientRect().top;
-      const candidates = Array.from(content.children).flatMap((element) => {
+      const candidates = Array.from(rows.children).flatMap((element) => {
         if (!(element instanceof HTMLElement) || !element.dataset.entryId) return [];
         const rect = element.getBoundingClientRect();
         return [{ entryId: element.dataset.entryId, top: rect.top, bottom: rect.bottom }];
@@ -640,9 +542,9 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
 
   useLayoutEffect(() => {
     const position = pendingScrollRestore;
-    const content = messageContentRef.current;
-    if (!position || !content || searchTarget) return;
-    const element = Array.from(content.children).find((candidate) => (
+    const rows = transcriptRowsRef.current;
+    if (!position || !rows || searchTarget) return;
+    const element = Array.from(rows.children).find((candidate) => (
       candidate instanceof HTMLElement && candidate.dataset.entryId === position.anchorEntryId
     ));
     if (element instanceof HTMLElement) {
@@ -1024,6 +926,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       modelList={modelList}
       modelError={modelError}
       missingCwd={missingCwd}
+      onForkMissingCwd={canForkMissingCwd ? openForkPicker : undefined}
       modelScopeWarnings={modelScopeWarnings}
       allModelList={allModelList}
       onLoadAllModels={isModelScopeActive ? loadAllModels : undefined}
@@ -1156,7 +1059,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
           style={{ visibility: pendingScrollRestore ? "hidden" : undefined }}
         >
           <div style={{ minWidth: 0, padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
-            <div ref={messageContentRef} onPointerUp={captureQuotedSelection} style={{ width: "100%", minWidth: 0, maxWidth: "var(--chat-content-max-width, 820px)", margin: "0 auto" }}>
+            <div ref={messageContentRef} style={{ width: "100%", minWidth: 0, maxWidth: "var(--chat-content-max-width, 820px)", margin: "0 auto" }}>
             {(() => {
               let lastUserIdx = -1;
               for (let i = messages.length - 1; i >= 0; i--) {
@@ -1208,6 +1111,8 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                   }
                 }
                 if (options.showTimestamp !== undefined) showTimestamp = options.showTimestamp;
+                // A prompt sent during the run: its entry id, for New session only (#1746).
+                const liveEntryId = entryIds[idx] === undefined ? liveUserEntryIds.get(messages[idx]) : undefined;
                 const view = (
                   <MessageView
                     key={`${keyPrefix}-view-${messageKey}`}
@@ -1221,7 +1126,8 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                     entryId={entryIds[idx]}
                     searchBlock={entryIds[idx] === pendingSearchScroll?.entryId ? searchBlock : undefined}
                     onFork={bashRunning || isNew ? undefined : forkFromMessage}
-                    forking={forkingEntryId === entryIds[idx]}
+                    forkEntryId={liveEntryId}
+                    forking={forkingEntryId === (entryIds[idx] ?? liveEntryId)}
                     onEditContent={sessionBusy ? undefined : handleEditContent}
                     onCancelEdit={cancelEdit}
                     isEditing={editEntryId === entryIds[idx]}
@@ -1389,7 +1295,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                        {t("chat.loadEarlier")}
                     </div>
                   )}
-                  {rendered.slice(startIndex)}
+                  <div ref={attachTranscriptRows}>{rendered.slice(startIndex)}</div>
                 </>
               );
             })()}
@@ -1491,86 +1397,12 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
         />
       )}
 
-      {quoteSelectionEnabled && quotedSelection && createPortal(
-        <div
-          ref={quotePopoverRef}
-          role={quoteInputOpen ? "dialog" : "toolbar"}
-          aria-label={t(quoteInputOpen ? "chat.newQuoteChat" : "chat.selectionActions")}
-          style={{
-            position: "fixed",
-            top: quotedSelection.top,
-            left: quotedSelection.left,
-            zIndex: 260,
-            display: "flex",
-            flexWrap: "wrap",
-            gap: 3,
-            width: quoteInputOpen ? "min(420px, calc(100vw - 16px))" : undefined,
-            maxWidth: "calc(100vw - 16px)",
-            maxHeight: "calc(var(--app-viewport-height, 100dvh) - 16px)",
-            overflowY: "auto",
-            padding: quoteInputOpen ? 12 : 3,
-            border: "1px solid var(--border)",
-            borderRadius: 6,
-            background: "var(--bg)",
-            boxShadow: "0 2px 10px rgba(0,0,0,0.12)",
-          }}
-        >
-          {quoteInputOpen ? (
-            <fieldset
-              disabled={quoteSubmitting}
-              aria-busy={quoteSubmitting}
-              style={{ width: "100%", minWidth: 0, margin: 0, padding: 0, border: "none", display: "flex", flexDirection: "column", gap: 10 }}
-            >
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <span style={{ flex: 1, minWidth: 0, fontSize: 12, fontWeight: 600 }}>{t("chat.askInSideChat")}</span>
-                <button type="button" className="file-viewer-icon-button" title={t("i18n.close")} aria-label={t("i18n.close")} disabled={quoteSubmitting} onClick={closeQuotedSelection} style={{ border: "none" }}>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
-                </button>
-              </div>
-              <ChatInput
-                ref={quoteChatInputRef}
-                compact
-                onSend={askSelectionInSideChat}
-                onAbort={closeQuotedSelection}
-                isStreaming={false}
-              />
-              {quoteError && <div role="alert" style={{ color: "#dc2626", fontSize: 12, overflowWrap: "anywhere" }}>{quoteError}</div>}
-            </fieldset>
-          ) : <>
-          <button
-            type="button"
-            className="file-viewer-icon-button"
-            title={t("chat.quoteSelection")}
-            aria-label={t("chat.quoteSelection")}
-            onPointerDown={(event) => event.preventDefault()}
-            onClick={quoteSelectionHere}
-            style={{ width: "auto", height: 35, flex: "0 0 auto", gap: 5, padding: "0 10px", border: "none", fontSize: 12, fontWeight: 500 }}
-          >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M16 3a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2 1 1 0 0 1 1 1v1a2 2 0 0 1-2 2 1 1 0 0 0-1 1v2a1 1 0 0 0 1 1 6 6 0 0 0 6-6V5a2 2 0 0 0-2-2z" />
-              <path d="M5 3a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2 1 1 0 0 1 1 1v1a2 2 0 0 1-2 2 1 1 0 0 0-1 1v2a1 1 0 0 0 1 1 6 6 0 0 0 6-6V5a2 2 0 0 0-2-2z" />
-            </svg>
-            <span>{t("chat.quoteSelection")}</span>
-          </button>
-          {onSideSession && !isHiddenRelation(session?.relation) && (
-            <button
-              type="button"
-              className="file-viewer-icon-button"
-              title={t("chat.askInSideChat")}
-              aria-label={t("chat.askInSideChat")}
-              onPointerDown={(event) => event.preventDefault()}
-              onClick={() => { setQuoteInputOpen(true); window.getSelection()?.removeAllRanges(); }}
-              style={{ width: "auto", height: 35, flex: "0 0 auto", gap: 5, padding: "0 10px", border: "none", fontSize: 12, fontWeight: 500 }}
-            >
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M21 12a8 8 0 0 1-8 8H5.5a2 2 0 0 1-1.4-3.4A8 8 0 1 1 21 12z" />
-              </svg>
-              <span>{t("chat.askInSideChat")}</span>
-            </button>
-          )}
-          </>}
-        </div>,
-        document.body,
+      {quoteSelectionEnabled && (
+        <QuoteSelectionPopover
+          rootRef={messageContentRef}
+          chatInputRef={chatInputRef}
+          startSideChat={onSideSession && !isHiddenRelation(session?.relation) ? startSideChat : undefined}
+        />
       )}
 
       {/* 输入框和状态栏在轨迹盖层下面：用 visibility 藏起来（不可聚焦、读屏也跳过），不改它的
@@ -1639,7 +1471,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
         />
       </div>
       {isEmptyNew && <div className="min-h-0 flex-1" />}
-      {hotkeysDialogOpen && (
+{hotkeysDialogOpen && (
         <HotkeysDialog onClose={() => setHotkeysDialogOpen(false)} />
       )}
       {shareSessionId && (
@@ -1671,6 +1503,17 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
           }}
         />
       )}
+      {forkPickerOpen && (
+        <DirectoryPicker
+          busy={forkPickerBusy}
+          error={forkPickerError}
+          onCancel={() => {
+            setForkPickerOpen(false);
+            setForkPickerError(null);
+          }}
+          onSelect={(path) => void handleForkPick(path)}
+        />
+      )}
     </div>
   );
 }
@@ -1700,7 +1543,7 @@ const StreamingReply = memo(function StreamingReply({ store, onCommit, toolResul
   const message = useStreamingSelector(store, selectStreamingMessage);
   useLayoutEffect(onCommit, [message, onCommit]);
   if (!message) return null;
-  return <MessageView message={message} toolResults={toolResults} isStreaming modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} onOpenSubagent={onOpenSubagent} />;
+  return <MessageView key={streamRateKey(message)} message={message} toolResults={toolResults} isStreaming modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} onOpenSubagent={onOpenSubagent} />;
 });
 
 // A one-line notice is exactly as tall as its entrance animation pins it, and

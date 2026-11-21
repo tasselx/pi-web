@@ -59,6 +59,17 @@ test("on a narrow phone a message's actions drop their labels and keep their tit
   assert.match(css, /@media \(max-width: 380px\) \{\s*\.message-action-label \{\s*display: none;\s*\}\s*\}/);
 });
 
+test("a prompt sent during the run offers New session from the entry the wrapper named, not Edit (#1746)", () => {
+  const props = { forkEntryId: "live-entry", onFork: () => {}, onEditContent: () => {} };
+  const html = renderMessage({ role: "user", content: "Hi", timestamp: 1 }, props);
+  assert.ok(html.includes('title="New session — creates an independent copy from here"'));
+  assert.ok(!html.includes('title="Edit from here — branches within this session"'));
+  const without = renderMessage({ role: "user", content: "Hi", timestamp: 1 }, { onFork: () => {} });
+  assert.ok(!without.includes('title="New session — creates an independent copy from here"'));
+  const message = { role: "user", content: "Hi", timestamp: 1 };
+  assert.equal(MessageView.compare({ message, onFork: props.onFork }, { message, ...props, onEditContent: undefined }), false);
+});
+
 test("streaming headers preserve counts and speed without showing empty metrics", () => {
   const renderHeader = (props) => renderToStaticMarkup(React.createElement(
     I18nProvider, null, React.createElement(AssistantMessageHeader, { modelName: "Test Model", ...props }),
@@ -118,6 +129,32 @@ test("previews the first thinking line and reveals the full text with the saved 
   }
 });
 
+test("a reply's terminal escape sequences are not shown as text (#1753)", () => {
+  const previousWindow = globalThis.window;
+  try {
+    for (const expanded of [false, true]) {
+      globalThis.window = { localStorage: { getItem: () => String(expanded) } };
+      const html = renderToStaticMarkup(React.createElement(
+        I18nProvider,
+        null,
+        React.createElement(ThinkingBlock, {
+          block: { type: "thinking", thinking: "\x1b[38;5;5mThinking:\x1b[39m \x1b[39m\x1b[2mInteresting: a plan\nSecond\x1b[22m line" },
+          blockIndex: 0,
+        }),
+      ));
+      assert.doesNotMatch(html, /\x1b|\[\d+(?:;\d+)*m/);
+      assert.match(html, /Thinking: Interesting: a plan/);
+      assert.equal(html.includes("Second line"), expanded);
+    }
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+  const answer = renderMessage({ role: "assistant", content: [{ type: "text", text: "\x1b[1mDone\x1b[0m: **ok**" }] });
+  assert.doesNotMatch(answer, /\x1b|\[\d+m/);
+  assert.match(answer, /Done: <strong>ok<\/strong>/);
+});
+
 test("renders long expanded thinking in pieces and short thinking as one text node (#1196)", () => {
   const previousWindow = globalThis.window;
   globalThis.window = { localStorage: { getItem: () => "true" } };
@@ -158,6 +195,22 @@ test("shows deferred thinking previews without loading the full content", () => 
   });
   assert.match(html, />Historical first line<\/span>/);
   assert.match(html, /aria-expanded="false"/);
+});
+
+test("keys a streaming reply by its request identity across reconnects", () => {
+  const source = ts.createSourceFile("ChatWindow.tsx", readFileSync(new URL("./ChatWindow.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const keys = [];
+  (function visit(node) {
+    if ((ts.isJsxSelfClosingElement(node) || ts.isJsxOpeningElement(node)) && node.tagName.getText(source) === "MessageView") {
+      const attributes = node.attributes.properties.filter(ts.isJsxAttribute);
+      if (attributes.some((attribute) => attribute.name.getText(source) === "isStreaming" && !attribute.initializer)) {
+        const key = attributes.find((attribute) => attribute.name.getText(source) === "key");
+        keys.push(key?.initializer?.expression?.getText(source));
+      }
+    }
+    ts.forEachChild(node, visit);
+  })(source);
+  assert.deepEqual(keys, ["streamRateKey(message)"]);
 });
 
 test("keys an assistant message's blocks by their place, not the entry id (#1184)", () => {

@@ -1,11 +1,16 @@
+import { stripAnsi } from "./ansi";
 import type { AgentMessage, AssistantContentBlock, AssistantMessage, ThinkingContent, ToolCallContent } from "./types";
 
 interface DisplayOptions {
   isStreaming?: boolean;
 }
 
+const THINKING_PREVIEW_SOURCE_CHARS = 4_000;
+
+/** The thinking's first line, without the terminal escapes a model may write (#1753). */
 export function getThinkingPreview(thinking: string): string {
-  return thinking.trimStart().match(/^[^\r\n]{0,240}/u)?.[0].trimEnd() ?? "";
+  const head = stripAnsi(thinking.trimStart().slice(0, THINKING_PREVIEW_SOURCE_CHARS)).trimStart();
+  return head.match(/^[^\r\n]{0,240}/u)?.[0].trimEnd() ?? "";
 }
 
 export const THINKING_PIECE_CHARS = 8_000;
@@ -79,7 +84,8 @@ export interface TurnAnchorMessage {
 /**
  * The turn anchors that need no context: a user message, the compaction summary,
  * and a background subagent completion, pi-web's own and @tintinweb/pi-subagents'
- * (a follow-up that triggers a turn). getTurnAnchors() adds the extension
+ * (a follow-up that triggers a turn; pi-web's is steered into a parent's running
+ * run, where it opens a turn as a user's steer does). getTurnAnchors() adds the extension
  * messages that started a run of their own, which only the order shows.
  */
 export function isMessageGroupAnchor(message: TurnAnchorMessage): boolean {

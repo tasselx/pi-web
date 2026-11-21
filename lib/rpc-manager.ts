@@ -70,7 +70,7 @@ import type { DebugMcpHost, DebugSessionLifecycle, DebugWrapperSnapshot } from "
 import { mcpPromptPreparation, type McpCommandCandidate } from "./mcp-command";
 import { createReadOnlyMcpPolicyExtension, createSubagentMcpPolicyExtension } from "./mcp-read-only-policy";
 import { createSubagentSkillsBinding } from "./subagent-skills";
-import { isNestedToolExecutionEvent } from "./agent-event-wire";
+import { isNestedToolExecutionEvent, liveToolExecutionEvent, parallelToolCallIds } from "./agent-event-wire";
 import { collectStartupIssues, extensionErrorMessage, limitStartupNotices, type StartupIssue } from "./startup-issues";
 import { collectLiveAssistantNotices, readShowCacheMissNotices, withSessionPrices } from "./transcript-notices-server";
 import { refreshSleepInhibitor } from "./sleep-inhibitor";
@@ -152,6 +152,8 @@ type ActiveCustomUi = {
   resolve: (value: unknown) => void;
   settled: boolean;
 };
+
+const MAX_TIMER_MS = 2 ** 31 - 1;
 
 type ExtensionUiRequestBody = Record<string, unknown> & {
   method: ExtensionUiRequest["method"];
@@ -372,6 +374,8 @@ export class AgentSessionWrapper {
   // next stream miss that same event.
   private listeners = new Set<EventListener>();
   private activeToolEvents = new Map<string, ActiveToolEvents>();
+  private completedToolEvents = new Map<string, AgentEvent>();
+  private pendingParallelToolCalls = new Set<string>();
   private pendingUiResponses = new Map<string, PendingUiResponse>();
   private pendingUiRequests = new Map<string, AgentEvent>();
   private activeCustomUis = new Map<string, ActiveCustomUi>();
@@ -667,6 +671,8 @@ export class AgentSessionWrapper {
         invalidateSessionListCache();
         // Every tool call of the run has finished; nothing is left to replay.
         this.activeToolEvents.clear();
+        this.completedToolEvents.clear();
+        this.pendingParallelToolCalls.clear();
       }
       // A name from setSessionName(), an extension's included: a title generated
       // in the background lands after the run's agent_end, a command's with no
@@ -678,17 +684,46 @@ export class AgentSessionWrapper {
         // Prompts parked while compaction ran go out now, FIFO, whatever its outcome (as the TUI).
         this.flushParkedPrompts();
       }
+      const liveEvent = event.type === "tool_execution_end"
+        ? liveToolExecutionEvent(event, this.activeToolEvents.size > 0
+          || (!this.inner.agent.signal?.aborted && this.pendingParallelToolCalls.size > 0))
+        : event;
       this.emit(
-        event.type === "message_end" ? this.withTranscriptNotices(event)
-          : event.type === "agent_settled" ? this.withSubagentsActive(event)
-            : event,
+        liveEvent.type === "message_end" ? this.withTranscriptNotices(liveEvent)
+          : liveEvent.type === "agent_settled" ? this.withSubagentsActive(liveEvent)
+            : liveEvent,
       );
+      if (event.type === "message_end") this.announceUserMessageEntry(event.message);
       if (event.type === "agent_settled") this.notifyAgentRunCompleteIfIdle();
       // 运行 / 压缩 / 空闲的转换都从这些事件经过：让「运行时防止系统休眠」按当前状态拿锁或放锁。
       refreshSleepInhibitor();
       this.checkExtensionShutdown();
     });
     this.resetIdleTimer();
+  }
+
+  /**
+   * `user_message_entry` with the entry id of a user message just delivered (the run's prompt,
+   * a steer, a follow-up). pi appends the message only after emitting its `message_end`, in the
+   * same synchronous step, and announces the id to no one; the chat's "New session" on that
+   * message needs it before the run's end reads the file (#1746). The entry holds the very
+   * message object the event carried. `timestamp` is the message's, for the page to match it.
+   */
+  private announceUserMessageEntry(message: unknown): void {
+    if (this.listeners.size === 0 || (message as { role?: unknown } | undefined)?.role !== "user") return;
+    queueMicrotask(() => {
+      const branch = this.inner.sessionManager.getBranch() as unknown as SessionEntry[];
+      for (let i = branch.length - 1; i >= 0; i--) {
+        const entry = branch[i];
+        if (entry.type !== "message" || (entry as SessionMessageEntry).message !== message) continue;
+        this.emit({
+          type: "user_message_entry",
+          entryId: entry.id,
+          timestamp: (message as { timestamp?: unknown }).timestamp,
+        });
+        return;
+      }
+    });
   }
 
   /**
@@ -717,13 +752,21 @@ export class AgentSessionWrapper {
   }
 
   /**
-   * Keep the start and the latest update of each running tool call for onEvent()
-   * to replay. Calls a tool makes itself (a codemode script's, which carry
-   * `parentToolCallId`) are left out: a reconnecting client would show each as a
-   * top-level tool, and the parent's own update already reports them. A nested
-   * end can still arrive after its parent's, and is ignored like the rest.
+   * Keep running calls and completed results for reconnect, before slimming live events.
+   * The full parallel batch includes calls that have not started yet: preparation
+   * can finish a call before the next start. Nested calls belong to their parent.
    */
   private trackActiveToolEvent(event: AgentEvent): void {
+    if (event.type === "message_end") {
+      const message = event.message as { role?: string; toolCallId?: string; content?: unknown; stopReason?: unknown } | undefined;
+      if (message?.role === "assistant") {
+        this.pendingParallelToolCalls = parallelToolCallIds(message.content, this.inner.agent, message.stopReason);
+      } else if (message?.role === "toolResult" && message.toolCallId) {
+        this.completedToolEvents.delete(message.toolCallId);
+        this.pendingParallelToolCalls.delete(message.toolCallId);
+      }
+      return;
+    }
     const toolCallId = event.toolCallId;
     if (typeof toolCallId !== "string" || isNestedToolExecutionEvent(event)) return;
     if (event.type === "tool_execution_start") {
@@ -732,6 +775,8 @@ export class AgentSessionWrapper {
       const active = this.activeToolEvents.get(toolCallId);
       if (active) active.update = event;
     } else if (event.type === "tool_execution_end") {
+      if (event.result) this.completedToolEvents.set(toolCallId, event);
+      this.pendingParallelToolCalls.delete(toolCallId);
       this.activeToolEvents.delete(toolCallId);
       const nestedPrefix = `${toolCallId}/`;
       for (const id of this.activeToolEvents.keys()) {
@@ -861,6 +906,7 @@ export class AgentSessionWrapper {
         streamingBehavior: entry.streamingBehavior ?? "steer",
         preflightResult: (result) => {
           disposition = result;
+          if (result === "started") this.recordModelOnBranch();
           release();
         },
       });
@@ -1118,6 +1164,23 @@ export class AgentSessionWrapper {
     return { cancelled: false };
   }
 
+  /**
+   * When a prompt starts a run, make the branch record the model the session runs on. A
+   * `model_change` made on a branch that an edit-and-resend or a tree move then left stays
+   * on that dead branch, and a side chat or a reopened session reads the model from the
+   * branch's latest `model_change` (#1715). Called from pi's `preflightResult("started")`,
+   * right before pi's own `_recordSelection()`, which records only virtual selections
+   * because its resume also reads the latest response's model, which pi-web does not.
+   */
+  private recordModelOnBranch(): void {
+    const model = this.inner.model;
+    if (!model) return;
+    const manager = this.inner.sessionManager;
+    const recorded = getLatestModelChange(manager.getBranch() as unknown as SessionEntry[]);
+    if (!recorded || (recorded.provider === model.provider && recorded.modelId === model.id)) return;
+    manager.appendModelChange(model.provider, model.id);
+  }
+
   /** The first prompt names a side chat that still has the name it started with. */
   private nameSideChat(message: unknown): void {
     if (this.inner.sessionManager.getSessionName() !== SIDE_SESSION_NAME || typeof message !== "string") return;
@@ -1260,6 +1323,7 @@ export class AgentSessionWrapper {
       listener({ ...start, elapsedMs: Math.max(0, Math.round(now - startedAt)) });
       if (update) listener(update);
     }
+    for (const event of this.completedToolEvents.values()) listener(event);
     for (const event of this.startupNotices ?? []) listener(event);
     return () => {
       this.listeners.delete(listener);
@@ -1357,9 +1421,10 @@ export class AgentSessionWrapper {
       }
       // A session whose folder was deleted outside pi-web stays readable, but a
       // run there would reach the model only for its tools to fail (and `write`
-      // to recreate the folder). The pi CLI does not resume such a session
-      // either; refuse as /api/agent/new does. (A `!` command already refuses.)
-      // Typed, so the route names the folder for the composer (#1422).
+      // to recreate the folder). The pi CLI asks to continue elsewhere or fork
+      // instead; refuse as /api/agent/new does, and the composer offers the fork.
+      // (A `!` command already refuses.) Typed, so the route names the folder for
+      // the composer (#1422).
       if (type === "prompt" && !existsSync(this.cwd)) {
         throw cwdMissingError(this.cwd);
       }
@@ -1464,7 +1529,10 @@ export class AgentSessionWrapper {
               // validation and extension preflight have accepted the submission.
               // Every disposition (handled, queued, started) is an acceptance; a
               // rejected prompt never calls this and rejects `prompt` instead.
-              preflightResult: () => acceptPreflight(),
+              preflightResult: (disposition) => {
+                if (disposition === "started") this.recordModelOnBranch();
+                acceptPreflight();
+              },
             });
           } catch (error) {
             finishPrompt();
@@ -2042,6 +2110,8 @@ export class AgentSessionWrapper {
     this.pendingUiResponses.clear();
     this.pendingUiRequests.clear();
     this.activeToolEvents.clear();
+    this.completedToolEvents.clear();
+    this.pendingParallelToolCalls.clear();
     this.clearExtensionWidgets(false);
 
     const finishDispose = () => {
@@ -2527,10 +2597,13 @@ export class AgentSessionWrapper {
     request: ExtensionUiRequestBody,
     defaultValue: T,
     parseResponse: (response: ExtensionUiResponse) => T,
-    timeout?: number,
+    rawTimeout?: number,
     signal?: AbortSignal,
   ): Promise<T> {
     if (signal?.aborted) return Promise.resolve(defaultValue);
+    // As pi's TUI (`opts.timeout > 0`, counted down in seconds): only a positive number is a
+    // deadline, and a huge one (Infinity, Number.MAX_SAFE_INTEGER) waits for the person.
+    const timeout = typeof rawTimeout === "number" && rawTimeout > 0 && Number.isFinite(rawTimeout) ? rawTimeout : undefined;
     // Past destroy() nobody can answer: a session_start the shutdown deadline cut short goes on,
     // and is refused at once, as after Stop. A cancelled answer would let a handler that asks
     // until it is answered spin the server forever.
@@ -2540,11 +2613,12 @@ export class AgentSessionWrapper {
     const abortSignal = signal ? AbortSignal.any([signal, stopSignal]) : stopSignal;
 
     const id = randomUUID();
+    const deadline = Date.now() + (timeout ?? 0);
     const fullRequest = {
       type: "extension_ui_request",
       id,
       ...request,
-      ...(timeout ? { timeout, expiresAt: Date.now() + timeout } : {}),
+      ...(timeout ? { timeout, expiresAt: deadline } : {}),
     };
 
     return new Promise((resolve, reject) => {
@@ -2566,7 +2640,14 @@ export class AgentSessionWrapper {
       };
       const onAbort = () => settle(defaultValue);
 
-      if (timeout) timeoutId = setTimeout(() => settle(defaultValue), timeout);
+      // setTimeout fires after 1 ms past 2^31 - 1 ms, so a long deadline is waited in steps.
+      const armTimeout = () => {
+        const left = deadline - Date.now();
+        timeoutId = left <= MAX_TIMER_MS
+          ? setTimeout(() => settle(defaultValue), Math.max(0, left))
+          : setTimeout(armTimeout, MAX_TIMER_MS);
+      };
+      if (timeout) armTimeout();
       abortSignal.addEventListener("abort", onAbort, { once: true });
 
       this.pendingUiRequests.set(id, fullRequest as AgentEvent);
@@ -2581,28 +2662,28 @@ export class AgentSessionWrapper {
   private createExtensionUiContext(): ExtensionUiContextLike {
     return {
       select: (title, options, opts) => this.requestExtensionUi(
-        { method: "select", title, options, ...(opts?.timeout ? { timeout: opts.timeout } : {}) },
+        { method: "select", title, options },
         undefined,
         (response) => "value" in response ? response.value : undefined,
         opts?.timeout,
         opts?.signal,
       ),
       confirm: (title, message, opts) => this.requestExtensionUi(
-        { method: "confirm", title, message, ...(opts?.timeout ? { timeout: opts.timeout } : {}) },
+        { method: "confirm", title, message },
         false,
         (response) => "confirmed" in response ? response.confirmed : false,
         opts?.timeout,
         opts?.signal,
       ),
       input: (title, placeholder, opts) => this.requestExtensionUi(
-        { method: "input", title, ...(placeholder !== undefined ? { placeholder } : {}), ...(opts?.timeout ? { timeout: opts.timeout } : {}) },
+        { method: "input", title, ...(placeholder !== undefined ? { placeholder } : {}) },
         undefined,
         (response) => "value" in response ? response.value : undefined,
         opts?.timeout,
         opts?.signal,
       ),
       editor: (title, prefill, opts) => this.requestExtensionUi(
-        { method: "editor", title, ...(prefill !== undefined ? { prefill } : {}), ...(opts?.timeout ? { timeout: opts.timeout } : {}) },
+        { method: "editor", title, ...(prefill !== undefined ? { prefill } : {}) },
         undefined,
         (response) => "value" in response ? response.value : undefined,
         opts?.timeout,

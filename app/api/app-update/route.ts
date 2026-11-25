@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import type { AppUpdateResponse } from "@/lib/api-types";
 import { getPiWebReleaseUrl, isNewerStableVersion } from "@/lib/app-update";
+import { createRefreshingCache } from "@/lib/refreshing-cache";
 
 export const dynamic = "force-dynamic";
 
@@ -10,20 +11,6 @@ const NPM_LATEST_URL = "https://registry.npmjs.org/@tasselx%2Fpi-web/latest";
 const CACHE_TTL_MS = 12 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 5_000;
 const SKIP_VERSION_CHECK = process.env.PI_WEB_SKIP_VERSION_CHECK === "1";
-
-interface AppUpdateCache {
-  value?: AppUpdateResponse;
-  expiresAt: number;
-  inFlight?: Promise<AppUpdateResponse>;
-}
-
-declare global {
-  var __piWebAppUpdateCache: AppUpdateCache | undefined;
-}
-
-function getCache(): AppUpdateCache {
-  return globalThis.__piWebAppUpdateCache ??= { expiresAt: 0 };
-}
 
 async function fetchLatestVersion(): Promise<AppUpdateResponse> {
   const response = await fetch(NPM_LATEST_URL, {
@@ -46,29 +33,8 @@ async function fetchLatestVersion(): Promise<AppUpdateResponse> {
   };
 }
 
-// refresh：设置页里用户主动点「检查更新」时，绕过 12h 缓存实时查询，并且失败时如实报错、
-// 不再回退旧缓存——否则刚发布的新版会被旧缓存挡住，失败也会被旧的成功结果掩盖。
-// 页眉的被动检查不带 refresh，行为不变。
-async function loadUpdateStatus(refresh: boolean): Promise<AppUpdateResponse> {
-  const cache = getCache();
-  if (!refresh && cache.value && cache.expiresAt > Date.now()) return cache.value;
-  if (!cache.inFlight) {
-    cache.inFlight = fetchLatestVersion().then((value) => {
-      cache.value = value;
-      cache.expiresAt = Date.now() + CACHE_TTL_MS;
-      return value;
-    }).finally(() => {
-      cache.inFlight = undefined;
-    });
-  }
-
-  try {
-    return await cache.inFlight;
-  } catch (error) {
-    if (!refresh && cache.value) return cache.value;
-    throw error;
-  }
-}
+// refresh：设置页里用户主动点「检查更新」时，绕过 12h 缓存实时查询，并且失败时如实报错、不回退旧缓存。
+const loadUpdateStatus = createRefreshingCache("pi-web:app-update", CACHE_TTL_MS, fetchLatestVersion);
 
 export async function GET(req: Request) {
   if (SKIP_VERSION_CHECK) {

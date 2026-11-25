@@ -6,22 +6,11 @@ import { isLoopbackHost } from "@/lib/open-in-file-manager";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 import { exportSessionContent, normalizeExportFormat } from "@/lib/session-export";
 import { resolveSessionPath } from "@/lib/session-reader";
+import { contentDisposition } from "@/lib/content-disposition";
 
 export const runtime = "nodejs";
 
 let saveDialogOpen = false;
-
-function encodeHeaderValue(value: string): string {
-  return encodeURIComponent(value).replace(/[!'()*]/g, (ch) =>
-    `%${ch.charCodeAt(0).toString(16).toUpperCase()}`
-  );
-}
-
-function getContentDisposition(fileName: string, inline: boolean): string {
-  const fallback = fileName.replace(/[^\x20-\x7E]|["\\;\r\n]/g, "_") || "session.html";
-  const disposition = inline ? "inline" : "attachment";
-  return `${disposition}; filename="${fallback}"; filename*=UTF-8''${encodeHeaderValue(fileName)}`;
-}
 
 export async function GET(
   req: Request,
@@ -43,7 +32,7 @@ export async function GET(
     return new Response(content, {
       headers: {
         "Content-Type": contentType,
-        "Content-Disposition": getContentDisposition(fileName, inline && format === "html"),
+        "Content-Disposition": contentDisposition(inline && format === "html" ? "inline" : "attachment", fileName, "session.html"),
         "Cache-Control": "no-cache",
         "Content-Security-Policy": "frame-ancestors 'none'",
         "X-Content-Type-Options": "nosniff",

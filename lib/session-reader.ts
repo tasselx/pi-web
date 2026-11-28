@@ -1,9 +1,10 @@
 import {
+  CURRENT_SESSION_VERSION,
   SessionManager,
   getAgentDir,
 } from "@earendil-works/pi-coding-agent";
 import { closeSync, type Dirent, fstatSync, openSync, readSync, statSync } from "fs";
-import { readdir } from "fs/promises";
+import { open, readdir } from "fs/promises";
 import { isAbsolute, join, normalize as normalizePath, relative, resolve as resolvePath, sep } from "path";
 import type { AgentMessage, ImageContent, SessionEntry, SessionHeader, SessionInfo, SessionContext } from "./types";
 import { normalizeToolCalls } from "./normalize";
@@ -12,11 +13,14 @@ import { getThinkingPreview, getTurnAnchors, type TurnAnchorMessage } from "./me
 import { projectIdentityKey } from "./project-identity";
 import { sessionPathKey } from "./session-path";
 import { skillExpansionToCommand } from "./slash-display";
+import { sessionReferencesAsMentions } from "./session-reference-block";
 import { MAX_TOOL_RESULT_IMAGE_BYTES, TOOL_RESULT_IMAGE_MIMES } from "./tool-result-images";
 import { resolveProject, type ProjectInfo } from "./worktree";
 import { readSubagentRun, SUBAGENT_META_TYPE } from "./subagents";
 import { readSideRelation } from "./side-session";
 import { checkSessionMembership, listSessionsIncremental, scanSessionFileInfo, type ScannedSessionInfo } from "./session-list-scanner";
+import { SESSION_ID_PATTERN } from "./session-ui-state-shared";
+import { isRecord } from "./is-record";
 
 export { getAgentDir };
 
@@ -226,13 +230,14 @@ function resolveScannedSessionRelation(
  * The list's first message is for the row title and the subagent filter, never
  * the whole prompt: a pasted document or an expanded skill made one row 300 KB
  * and the list several MB, fetched again by every open tab after each run. A
- * skill expansion goes as the /skill: command its row shows; any other text is
- * cut to CATALOG_FIRST_MESSAGE_MAX code units, never splitting a surrogate pair.
+ * skill expansion goes as the /skill: command its row shows, a quoted session
+ * (`#` reference) as `#title` in place of its transcript; any other text is cut
+ * to CATALOG_FIRST_MESSAGE_MAX code units, never splitting a surrogate pair.
  */
 const CATALOG_FIRST_MESSAGE_MAX = 500;
 
 export function catalogFirstMessage(text: string): string {
-  const display = skillExpansionToCommand(text) ?? text;
+  const display = skillExpansionToCommand(text) ?? sessionReferencesAsMentions(text);
   if (display.length <= CATALOG_FIRST_MESSAGE_MAX) return display;
   const last = display.charCodeAt(CATALOG_FIRST_MESSAGE_MAX - 1);
   return display.slice(0, last >= 0xd800 && last <= 0xdbff ? CATALOG_FIRST_MESSAGE_MAX - 1 : CATALOG_FIRST_MESSAGE_MAX);
@@ -363,7 +368,6 @@ declare global {
 }
 
 const SESSION_LIST_CACHE_TTL_MS = 30_000;
-const SESSION_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
 
 function defaultSessionsDir(): string {
   return join(getAgentDir(), "sessions");
@@ -672,6 +676,78 @@ export function getSessionEntries(filePath: string): SessionEntry[] {
   return entries as unknown as SessionEntry[];
 }
 
+const SESSION_ENTRY_SCAN_CHUNK_BYTES = 1024 * 1024;
+
+/**
+ * One entry of a session file by id, for routes that answer from a single entry (a deferred
+ * thinking block or tool-result image).
+ *
+ * A file the read-only cache can hold goes through it, as every other read does. A larger one
+ * is never cached, so opening it again for each lazy image re-parsed the whole file into the heap
+ * (#1812); it is scanned line by line instead and only a line that contains the id as a JSON
+ * string is parsed. A legacy file (header version below pi's current one) still goes through
+ * `SessionManager`, whose migration gives entries their ids and rewrites the file.
+ */
+export async function readSessionEntry(filePath: string, entryId: string): Promise<SessionEntry | undefined> {
+  if (!entryId) return undefined;
+  const stats = sessionFileStats(filePath);
+  if (stats === null || stats.bytes <= SM_CACHE_LIMITS.maxFileBytes) {
+    return openSessionManager(filePath).getEntry(entryId) as SessionEntry | undefined;
+  }
+  const header = readSessionHeader(filePath);
+  if (!header || (header.version ?? 1) < CURRENT_SESSION_VERSION) {
+    return openSessionManager(filePath).getEntry(entryId) as SessionEntry | undefined;
+  }
+  return scanSessionEntry(filePath, entryId);
+}
+
+async function scanSessionEntry(filePath: string, entryId: string): Promise<SessionEntry | undefined> {
+  // pi writes each entry with JSON.stringify, so its id appears as exactly this literal. Other
+  // lines may hold it too (a child's parentId, a label's targetId, text): the parse decides.
+  const needle = Buffer.from(JSON.stringify(entryId));
+  const handle = await open(filePath, "r");
+  try {
+    const chunk = Buffer.allocUnsafe(SESSION_ENTRY_SCAN_CHUNK_BYTES);
+    // Copies of the current line's earlier pieces when it spans reads (the next read reuses `chunk`).
+    let pending: Buffer[] = [];
+    for (;;) {
+      const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
+      if (bytesRead === 0) break;
+      const data = chunk.subarray(0, bytesRead);
+      let lineStart = 0;
+      for (let newline = data.indexOf(0x0a); newline !== -1; newline = data.indexOf(0x0a, lineStart)) {
+        const entry = matchSessionEntryLine(pending, data.subarray(lineStart, newline), needle, entryId);
+        if (entry) return entry;
+        pending = [];
+        lineStart = newline + 1;
+      }
+      if (lineStart < data.length) pending.push(Buffer.from(data.subarray(lineStart)));
+    }
+    return matchSessionEntryLine(pending, Buffer.alloc(0), needle, entryId);
+  } finally {
+    await handle.close();
+  }
+}
+
+function matchSessionEntryLine(
+  pending: readonly Buffer[],
+  rest: Buffer,
+  needle: Buffer,
+  entryId: string,
+): SessionEntry | undefined {
+  const line = pending.length === 0 ? rest : Buffer.concat([...pending, rest]);
+  if (line.indexOf(needle) === -1) return undefined;
+  try {
+    // Malformed lines are skipped, as pi's loader skips them.
+    const entry: unknown = JSON.parse(line.toString("utf8"));
+    return isRecord(entry) && entry.type !== "session" && entry.id === entryId
+      ? entry as unknown as SessionEntry
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function getLatestModelChange(entries: SessionEntry[]): SessionContext["model"] {
   for (let i = entries.length - 1; i >= 0; i--) {
     const entry = entries[i];
@@ -861,10 +937,6 @@ export function sliceActiveBranch(
 function parseEntryTimestamp(timestamp: string): number | undefined {
   const parsed = Date.parse(timestamp);
   return Number.isNaN(parsed) ? undefined : parsed;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function base64ImageInfo(block: unknown): { bytes: number; mime?: string } | null {

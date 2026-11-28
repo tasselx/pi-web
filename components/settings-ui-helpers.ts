@@ -1,4 +1,5 @@
 import type { ProjectTrustStatus, SleepInhibitStatus } from "@/lib/api-types";
+import type { Translate } from "@/lib/i18n/types";
 
 /**
  * The rows a group switch would change: those not already in the requested
@@ -42,4 +43,9 @@ export function sleepInhibitNote(status: SleepInhibitStatus | null): SleepInhibi
   if (!status.supported) return { kind: "unavailable", reason: status.unsupportedReason ?? "" };
   if (status.enabled && status.failure) return { kind: "failed", reason: status.failure };
   return null;
+}
+
+/** A global or project scope's label, as Settings shows it. */
+export function scopeLabel(scope: "global" | "project", t: Translate): string {
+  return scope === "project" ? t("skills.scope.project") : t("skills.scope.global");
 }

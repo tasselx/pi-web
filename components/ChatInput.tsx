@@ -3,7 +3,7 @@
 import React, { memo, useRef, useState, useCallback, useEffect, useLayoutEffect, useImperativeHandle, forwardRef, KeyboardEvent } from "react";
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
 import type { SkillsResponse } from "@/lib/api-types";
-import type { TextContent, UserMessage } from "@/lib/types";
+import type { SessionInfo, TextContent, UserMessage } from "@/lib/types";
 import {
   clearDraft,
   getDraft,
@@ -23,9 +23,18 @@ import {
   buildEntriesFromFiles, buildAtInsertText, extractAtQuery, filterFileEntries,
   type AtQueryMatch, type FileIndexEntry,
 } from "@/lib/file-fuzzy";
+import { extractHashQuery, filterSessionEntries, HASH_RESULT_LIMIT, type HashQueryMatch } from "@/lib/session-fuzzy";
+import {
+  canAddSessionReference,
+  referenceTitle,
+  withSessionReferences,
+  type SessionReferenceTarget,
+} from "@/lib/session-reference-target";
+import { formatShortRelativeTime } from "@/lib/i18n/format";
 import { getMarkdownListContinuation } from "@/lib/markdown-list-continuation";
 import { quoteSeparator } from "@/lib/quoted-selection";
 import { isBareMcpCommand, isBuiltinMcpCommand } from "@/lib/mcp-command";
+import { formatCompactCount } from "@/lib/session-stats-format";
 import { FolderIcon, getFileIcon } from "./FileIcons";
 import { ImagePreview } from "./ImagePreview";
 import { DismissButton } from "./DismissButton";
@@ -106,6 +115,7 @@ interface Props {
    */
   extensionUiOpen?: boolean;
   onLoadSlashCommands?: () => Promise<SlashCommandInfo[]> | SlashCommandInfo[];
+  onGetArgumentCompletions?: (name: string, prefix: string, signal: AbortSignal) => Promise<Array<{ value: string; label: string; description?: string }> | null>;
   onBuiltinCommand?: (message: string) => Promise<BuiltinSlashCommandResult>;
   soundEnabled?: boolean;
   onSoundToggle?: () => void;
@@ -119,6 +129,8 @@ interface Props {
 
 export interface ChatInputHandle {
   insertText: (text: string) => void;
+  /** Add a quoted session's chip: the sidebar's "Insert into chat", a dragged row, or the picker. */
+  addSessionReference: (reference: SessionReferenceTarget) => void;
   /** An extension's `setEditorText()`: the draft becomes `text`, as pi's editor `setText()` does (undoable). */
   setText: (text: string) => void;
   /** An extension's `pasteToEditor()`: `text` at the caret as typed, like a paste. */
@@ -155,6 +167,71 @@ export function getUpwardMenuMaxHeight(menuBottom: number, visibleTop: number, g
 export function cycleListIndex(index: number, length: number, delta: number): number {
   if (length <= 0) return 0;
   return ((index + delta) % length + length) % length;
+}
+
+export interface ArgumentCompletionTarget {
+  commandName: string;
+  prefix: string;
+  start: number;
+  end: number;
+}
+
+export function argumentCompletionSnapshotKey(value: string, start: number, end: number, draftKey: string | undefined): string {
+  return JSON.stringify([value, start, end, draftKey]);
+}
+
+export function argumentCompletionSnapshotIsCurrent(storedSnapshot: string | null, currentSnapshot: string | null): boolean {
+  return storedSnapshot !== null && storedSnapshot === currentSnapshot;
+}
+
+export function argumentCompletionIsSuppressed(snapshot: string, suppressedSnapshot: string | null): boolean {
+  return snapshot === suppressedSnapshot;
+}
+
+export function ownsArgumentCompletionRequest(
+  requestId: number,
+  currentRequestId: number,
+  controller: AbortController,
+  currentController: AbortController | null,
+): boolean {
+  return requestId === currentRequestId && controller === currentController;
+}
+
+export function argumentCompletionOwnsEscape(input: {
+  visibleResults: boolean;
+  pendingRequest: boolean;
+  snapshot: string | null;
+  suppressedSnapshot: string | null;
+}): boolean {
+  return input.visibleResults || (input.pendingRequest && input.snapshot !== null && input.suppressedSnapshot !== input.snapshot);
+}
+
+export function getArgumentCompletionTarget(value: string, caret: number): ArgumentCompletionTarget | null {
+  const beforeCaret = value.slice(0, caret);
+  const leadingTrim = beforeCaret.length - beforeCaret.trimStart().length;
+  const commandText = beforeCaret.trimStart();
+  if (!commandText.startsWith("/")) return null;
+  const separator = commandText.indexOf(" ");
+  if (separator <= 0) return null;
+  return {
+    commandName: commandText.slice(1, separator),
+    prefix: commandText.slice(separator + 1),
+    start: leadingTrim + separator + 1,
+    end: caret,
+  };
+}
+
+export function replaceArgumentCompletion(
+  textarea: HTMLTextAreaElement,
+  target: ArgumentCompletionTarget,
+  value: string,
+  draftKey: string | undefined,
+  afterNativeInput: (snapshot: string) => void,
+): string {
+  replaceTextareaRange(textarea, target.start, target.end, value);
+  const snapshot = argumentCompletionSnapshotKey(textarea.value, textarea.selectionStart, textarea.selectionEnd, draftKey);
+  afterNativeInput(snapshot);
+  return snapshot;
 }
 
 // Plain replacement for when execCommand is unavailable or refuses: no undo
@@ -238,7 +315,8 @@ export function replaceLinksWithMarkdown(
  * overflows the box stays cut off instead of showing a scrollbar.
  *
  * The "auto" step clamps scrollTop to 0, so the scroll the browser gave the
- * caret is captured first and restored last.
+ * caret is captured first and restored last; a caret at the end follows the
+ * end of the text instead.
  */
 export function autoGrowTextarea(ta: HTMLTextAreaElement): void {
   // The "auto" step fits the whole text, which clamps scrollTop to 0; keep the
@@ -249,6 +327,10 @@ export function autoGrowTextarea(ta: HTMLTextAreaElement): void {
   ta.style.height = `${ta.value ? Math.min(ta.scrollHeight, 200) : ta.clientHeight}px`;
   ta.style.overflowY = ta.value && ta.scrollHeight > ta.clientHeight ? "auto" : "hidden";
   ta.scrollTop = scrollTop;
+  // A re-wrap with no keystroke (the run's buttons narrowing the composer, a
+  // font change) brings no browser caret scroll, so the old offset can leave an
+  // end caret below the fold.
+  if (ta.value) scrollTextareaCaretIntoView(ta);
 }
 
 /**
@@ -321,12 +403,6 @@ const THINKING_LEVEL_DESC_KEYS: Record<typeof THINKING_LEVELS[number], string> =
   auto: "chat.thinkingUseDefault", off: "chat.thinkingOff", minimal: "chat.thinkingMinimal", low: "chat.thinkingLow",
   medium: "chat.thinkingMedium", high: "chat.thinkingHigh", xhigh: "chat.thinkingXhigh", max: "chat.thinkingMax",
 };
-
-function formatTokenCount(tokens: number): string {
-  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
-  if (tokens >= 1_000) return `${Math.round(tokens / 1_000)}k`;
-  return tokens.toLocaleString();
-}
 
 type BuiltinSlashCommand = {
   name: string;
@@ -748,6 +824,60 @@ export function ModelScopeWarningBanner({ warnings }: { warnings?: string[] }) {
   );
 }
 
+// Keep the slash and argument-completion palettes visually consistent.
+function paletteShellStyle(maxHeight: string): React.CSSProperties {
+  return {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: "calc(100% + 8px)",
+    zIndex: 120,
+    background: "var(--bg)",
+    border: "1px solid var(--border)",
+    borderRadius: 8,
+    boxShadow: "0 -6px 20px rgba(0,0,0,0.12)",
+    overflow: "hidden",
+    boxSizing: "border-box",
+    display: "flex",
+    flexDirection: "column",
+    maxHeight,
+  };
+}
+
+function paletteHeaderStyle(): React.CSSProperties {
+  return {
+    padding: "8px 10px",
+    borderBottom: "1px solid var(--border)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+    fontSize: 11,
+    color: "var(--text-dim)",
+    flexShrink: 0,
+  };
+}
+
+function paletteCardStyle(active: boolean): React.CSSProperties {
+  return {
+    width: "100%",
+    minWidth: 0,
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "flex-start",
+    gap: 4,
+    justifyContent: "center",
+    padding: "8px 10px",
+    border: `1px solid ${active ? "var(--accent)" : "var(--border)"}`,
+    borderRadius: 7,
+    background: active ? "var(--bg-selected)" : "var(--bg-panel)",
+    color: "var(--text)",
+    cursor: "pointer",
+    textAlign: "left",
+    boxShadow: active ? "0 0 0 1px color-mix(in srgb, var(--accent) 28%, transparent)" : "none",
+  };
+}
+
 // Memoized: its props hold still while a reply streams or a tool runs, and the
 // chat around it re-renders through both.
 export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
@@ -756,7 +886,7 @@ onSend, onAbort, onSteer, onSideChat, onFollowUp, isStreaming, model, isAutoMode
   onCompact, onAbortCompaction, isCompacting, compactError, onDismissCompactError, compactResult, toolPreset, onToolPresetChange,
   thinkingLevel, isAutoThinkingSelection = false, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap,
   retryInfo, queuedMessages, inputHistory = [], onRecallQueue,
-  slashCommands, slashCommandsLoading, onLoadSlashCommands,
+  slashCommands, slashCommandsLoading, onLoadSlashCommands, onGetArgumentCompletions,
   extensionUiOpen = false,
   onBuiltinCommand,
   soundEnabled, onSoundToggle, onAudioUnlock,
@@ -766,7 +896,7 @@ onSend, onAbort, onSteer, onSideChat, onFollowUp, isStreaming, model, isAutoMode
   onAttachFiles,
   compact = false,
 }: Props, ref) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const { fontSize } = useChatAppearance();
   const { ui: uiFontFamily, uiWeight } = useFontPreferences();
   const isMobile = useIsMobile();
@@ -780,16 +910,34 @@ onSend, onAbort, onSteer, onSideChat, onFollowUp, isStreaming, model, isAutoMode
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(() => (
     draftKey ? draftImagesToAttachedImages(getDraft(draftKey)?.images) : []
   ));
+  // Quoted sessions show as chips beside the images; their `[title](#session:id)`
+  // tokens are written into the message only when it is sent (#1716).
+  const [attachedReferences, setAttachedReferences] = useState<SessionReferenceTarget[]>(() => (
+    draftKey ? getDraft(draftKey)?.references ?? [] : []
+  ));
   const trimmedValue = value.trimStart();
-  const bashMode = attachedImages.length === 0 && trimmedValue.startsWith("!");
+  const bashMode = attachedImages.length === 0 && attachedReferences.length === 0 && trimmedValue.startsWith("!");
   const bashExcluded = bashMode && trimmedValue.startsWith("!!");
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
+  const [argumentCompletions, setArgumentCompletions] = useState<Array<{ value: string; label: string; description?: string }>>([]);
+  const [argumentCompletionIndex, setArgumentCompletionIndex] = useState(0);
+  const [argumentCompletionMaxHeight, setArgumentCompletionMaxHeight] = useState<number | null>(null);
+  const [argumentCaretRevision, setArgumentCaretRevision] = useState(0);
   const [slashMenuMaxHeight, setSlashMenuMaxHeight] = useState<number | null>(null);
   const [atQuery, setAtQuery] = useState<AtQueryMatch | null>(null);
   const [atMenuOpen, setAtMenuOpen] = useState(false);
   const [atMenuMaxHeight, setAtMenuMaxHeight] = useState<number | null>(null);
   const [atActiveIndex, setAtActiveIndex] = useState(0);
+  // # session autocomplete: like @ for files, but the completion inserts a
+  // reference token whose transcript the server quotes at send time
+  // (lib/session-reference.ts).
+  const [hashQuery, setHashQuery] = useState<HashQueryMatch | null>(null);
+  const [hashMenuOpen, setHashMenuOpen] = useState(false);
+  const [hashMenuMaxHeight, setHashMenuMaxHeight] = useState<number | null>(null);
+  const [hashActiveIndex, setHashActiveIndex] = useState(0);
+  const [hashSessions, setHashSessions] = useState<SessionInfo[] | null>(null);
+  const [hashLoading, setHashLoading] = useState(false);
   const [imageWarningDismissed, setImageWarningDismissed] = useState(false);
   const [historyMenuOpen, setHistoryMenuOpen] = useState(false);
   const [historyActiveIndex, setHistoryActiveIndex] = useState(0);
@@ -817,21 +965,60 @@ onSend, onAbort, onSteer, onSideChat, onFollowUp, isStreaming, model, isAutoMode
   const lastCompositionEndAtRef = useRef(0);
   const pendingPasteRef = useRef<object | null>(null);
   const slashCommandsRequestedRef = useRef(false);
+  const argumentCompletionRequestRef = useRef(0);
+  const argumentCompletionAbortRef = useRef<AbortController | null>(null);
+  const argumentCompletionSnapshotRef = useRef<string | null>(null);
+  const argumentCompletionRequestSnapshotRef = useRef<string | null>(null);
+  const argumentCompletionSuppressedRef = useRef<string | null>(null);
   const slashMenuRef = useRef<HTMLDivElement>(null);
   const slashItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const argumentCompletionItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const argumentCompletionMenuRef = useRef<HTMLDivElement>(null);
   const atMenuRef = useRef<HTMLDivElement>(null);
   const atItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const hashMenuRef = useRef<HTMLDivElement>(null);
+  const hashItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const hashFetchingRef = useRef(false);
   const historyItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const fileIndexMetaRef = useRef<{ cwd: string; fetchedAt: number } | null>(null);
   const fileIndexFetchingRef = useRef<string | null>(null);
   const draftKeyRef = useRef(draftKey);
   const valueRef = useRef(value);
   const attachedImagesRef = useRef(attachedImages);
+  const attachedReferencesRef = useRef(attachedReferences);
   const pendingImageCountRef = useRef(0);
   valueRef.current = value;
   attachedImagesRef.current = attachedImages;
+  attachedReferencesRef.current = attachedReferences;
+  const argumentCompletionVisible = !extensionUiOpen && !isComposingRef.current && argumentCompletions.length > 0
+    && argumentCompletionSnapshotIsCurrent(argumentCompletionSnapshotRef.current, argumentCompletionSnapshotKey(
+      textareaRef.current?.value ?? value,
+      textareaRef.current?.selectionStart ?? 0,
+      textareaRef.current?.selectionEnd ?? 0,
+      draftKey,
+    ));
+
+  // A referenced session joins the composer as a chip: its text never enters the
+  // textarea, so the draft stays the user's own words and the token is built
+  // when the message is sent (lib/session-reference-target.ts).
+  const addSessionReference = useCallback((reference: SessionReferenceTarget) => {
+    const current = attachedReferencesRef.current;
+    const next = canAddSessionReference(current, reference.id) ? [...current, reference] : current;
+    if (next !== current) {
+      attachedReferencesRef.current = next;
+      setAttachedReferences(next);
+    }
+    setHashQuery(null);
+    requestAnimationFrame(() => {
+      const ta = textareaRef.current;
+      if (!ta) return;
+      ta.focus();
+      autoGrowTextarea(ta);
+    });
+  }, []);
 
   useImperativeHandle(ref, () => ({
+    addSessionReference,
     setText(text: string) {
       const ta = textareaRef.current;
       if (!ta) {
@@ -844,6 +1031,7 @@ onSend, onAbort, onSteer, onSideChat, onFollowUp, isStreaming, model, isAutoMode
       ta.setSelectionRange(0, ta.value.length);
       replaceTextareaRange(ta, 0, ta.value.length, text);
       setAtQuery(null);
+      setHashQuery(null);
       requestAnimationFrame(() => autoGrowTextarea(ta));
     },
     pasteText(text: string) {
@@ -856,6 +1044,7 @@ onSend, onAbort, onSteer, onSideChat, onFollowUp, isStreaming, model, isAutoMode
       }
       replaceTextareaRange(ta, ta.selectionStart ?? ta.value.length, ta.selectionEnd ?? ta.value.length, text);
       setAtQuery(null);
+      setHashQuery(null);
       requestAnimationFrame(() => autoGrowTextarea(ta));
     },
     insertIfEmpty(text: string) {
@@ -865,6 +1054,7 @@ onSend, onAbort, onSteer, onSideChat, onFollowUp, isStreaming, model, isAutoMode
       valueRef.current = text;
       setValue(text);
       setAtQuery(null);
+      setHashQuery(null);
       requestAnimationFrame(() => {
         if (!ta) return;
         ta.focus();
@@ -883,6 +1073,7 @@ onSend, onAbort, onSteer, onSideChat, onFollowUp, isStreaming, model, isAutoMode
       attachedImagesRef.current = restoredImages;
       setValue(restoredText);
       setAtQuery(null);
+      setHashQuery(null);
       setHistoryMenuOpen(false);
       setAttachedImages((prev) => {
         prev.forEach(revokeImagePreview);
@@ -905,6 +1096,7 @@ onSend, onAbort, onSteer, onSideChat, onFollowUp, isStreaming, model, isAutoMode
       valueRef.current = combined;
       setValue(combined);
       setAtQuery(null);
+      setHashQuery(null);
       requestAnimationFrame(() => {
         if (!ta) return;
         ta.focus();
@@ -943,6 +1135,7 @@ onSend, onAbort, onSteer, onSideChat, onFollowUp, isStreaming, model, isAutoMode
         return movedImages;
       });
       setAtQuery(null);
+      setHashQuery(null);
       setHistoryMenuOpen(false);
     },
     restoreSubmission(text: string, images?: ChatDraftImage[], targetDraftKey?: string) {
@@ -989,6 +1182,7 @@ onSend, onAbort, onSteer, onSideChat, onFollowUp, isStreaming, model, isAutoMode
         return restored;
       });
       setAtQuery(null);
+      setHashQuery(null);
       setHistoryMenuOpen(false);
       if (images?.length) {
         setAttachedImages((current) => {
@@ -1028,6 +1222,7 @@ onSend, onAbort, onSteer, onSideChat, onFollowUp, isStreaming, model, isAutoMode
       const sep = before.length > 0 && !before.endsWith(" ") ? " " : "";
       replaceTextareaRange(ta, start, end, sep + text);
       setAtQuery(null);
+      setHashQuery(null);
     },
     insertQuote(text: string) {
       const ta = textareaRef.current;
@@ -1039,6 +1234,7 @@ onSend, onAbort, onSteer, onSideChat, onFollowUp, isStreaming, model, isAutoMode
       const end = ta.selectionEnd ?? ta.value.length;
       replaceTextareaRange(ta, start, end, quoteSeparator(ta.value.slice(0, start)) + text);
       setAtQuery(null);
+      setHashQuery(null);
     },
     addImages(files: File[]) {
       processImageFiles(files);
@@ -1093,6 +1289,24 @@ onSend, onAbort, onSteer, onSideChat, onFollowUp, isStreaming, model, isAutoMode
     });
   }, []);
 
+  const removeSessionReference = useCallback((id: string) => {
+    setAttachedReferences((prev) => {
+      const next = prev.filter((reference) => reference.id !== id);
+      attachedReferencesRef.current = next;
+      return next;
+    });
+  }, []);
+
+  // A chip's tooltip: the project folder and when the session last changed,
+  // the two facts a title alone does not tell.
+  const referenceTooltip = useCallback((reference: SessionReferenceTarget) => {
+    const project = reference.cwd ? reference.cwd.split(/[\\/]/).pop() ?? "" : "";
+    const updated = reference.modified
+      ? formatShortRelativeTime(reference.modified, locale, new Date())
+      : "";
+    return [project, updated].filter(Boolean).join(" · ") || referenceTitle(reference);
+  }, [locale]);
+
   const clearImages = useCallback(() => {
     attachedImagesRef.current = [];
     setAttachedImages((prev) => {
@@ -1102,13 +1316,23 @@ onSend, onAbort, onSteer, onSideChat, onFollowUp, isStreaming, model, isAutoMode
   }, []);
 
   const clearInput = useCallback(() => {
+    argumentCompletionRequestRef.current += 1;
+    argumentCompletionAbortRef.current?.abort();
+    argumentCompletionAbortRef.current = null;
+    argumentCompletionRequestSnapshotRef.current = null;
+    argumentCompletionSnapshotRef.current = null;
+    argumentCompletionSuppressedRef.current = null;
+    setArgumentCompletions([]);
     valueRef.current = "";
     setValue("");
     setAtQuery(null);
+    setHashQuery(null);
     setHistoryMenuOpen(false);
     if (draftKey) clearDraft(draftKey);
     if (draftKeyRef.current && draftKeyRef.current !== draftKey) clearDraft(draftKeyRef.current);
     clearImages();
+    attachedReferencesRef.current = [];
+    setAttachedReferences([]);
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
@@ -1119,8 +1343,9 @@ onSend, onAbort, onSteer, onSideChat, onFollowUp, isStreaming, model, isAutoMode
     setDraft(draftKey, {
       value,
       images: attachedImages.map(imageToDraftImage),
+      references: attachedReferences,
     });
-  }, [attachedImages, draftKey, value]);
+  }, [attachedImages, attachedReferences, draftKey, value]);
 
   useEffect(() => {
     const previousDraftKey = draftKeyRef.current;
@@ -1135,12 +1360,23 @@ onSend, onAbort, onSteer, onSideChat, onFollowUp, isStreaming, model, isAutoMode
 
     const draft = draftKey ? getDraft(draftKey) : null;
     draftKeyRef.current = draftKey;
+    argumentCompletionRequestRef.current += 1;
+    argumentCompletionAbortRef.current?.abort();
+    argumentCompletionAbortRef.current = null;
+    argumentCompletionRequestSnapshotRef.current = null;
+    argumentCompletionSnapshotRef.current = null;
+    argumentCompletionSuppressedRef.current = null;
+    setArgumentCompletions([]);
     const nextValue = draft?.value ?? "";
     const nextImages = draftImagesToAttachedImages(draft?.images);
+    const nextReferences = draft?.references ?? [];
     valueRef.current = nextValue;
     attachedImagesRef.current = nextImages;
+    attachedReferencesRef.current = nextReferences;
     setValue(nextValue);
+    setAttachedReferences(nextReferences);
     setAtQuery(null);
+    setHashQuery(null);
     setHistoryMenuOpen(false);
     setAttachedImages((prev) => {
       prev.forEach(revokeImagePreview);
@@ -1240,14 +1476,17 @@ onSend, onAbort, onSteer, onSideChat, onFollowUp, isStreaming, model, isAutoMode
 
   const handleSend = useCallback(async () => {
     const msg = value.trim();
-    if (!msg && !attachedImages.length) return;
+    const references = attachedReferencesRef.current;
+    if (!msg && !attachedImages.length && !references.length) return;
     onAudioUnlock?.();
     const builtinAllowed = !isStreaming || offersBuiltinSlashCommandWhileStreaming(msg);
     if (builtinAllowed && await runBuiltinCommand(msg)) return;
     // A `!` command runs beside the run, as in pi's TUI; anything else queues.
     if (isStreaming && !(msg.startsWith("!") && !attachedImages.length)) return;
     clearInput();
-    onSend(msg, attachedImages.length ? attachedImages : undefined);
+    // The chips become `[title](#session:id)` tokens at the end of the message,
+    // the one form the server expands (lib/session-reference.ts).
+    onSend(withSessionReferences(msg, references), attachedImages.length ? attachedImages : undefined);
   }, [value, attachedImages, isStreaming, runBuiltinCommand, onSend, clearInput, onAudioUnlock]);
 
   const slashQuery = !compact && value.startsWith("/") && !/\s/.test(value.slice(1))
@@ -1272,7 +1511,7 @@ onSend, onAbort, onSteer, onSideChat, onFollowUp, isStreaming, model, isAutoMode
     ? t(slashQuery ? "chat.match" : "chat.command")
     : t(slashQuery ? "chat.matches" : "chat.commands", { count: filteredSlashCommands.length });
   const hasInputText = Boolean(value.trim());
-  const canQueueStreamingMessage = hasInputText || attachedImages.length > 0;
+  const canQueueStreamingMessage = hasInputText || attachedImages.length > 0 || attachedReferences.length > 0;
   const stackedComposer = stacksComposerLayout(compact, isMobile, isStreaming);
   // Warn when images are attached but the selected model is known not to accept
   // image input (#584), including a resolved default. Unknown models stay silent.
@@ -1296,6 +1535,11 @@ onSend, onAbort, onSteer, onSideChat, onFollowUp, isStreaming, model, isAutoMode
     const pos = cursor ?? text.length;
     setAtQuery(extractAtQuery(text.slice(0, pos)));
   }, [cwd]);
+
+  const updateHashQuery = useCallback((text: string, cursor: number | null) => {
+    const pos = cursor ?? text.length;
+    setHashQuery(extractHashQuery(text.slice(0, pos)));
+  }, []);
 
   const atQueryText = atQuery?.query ?? null;
   const atLocalMatches: FileIndexEntry[] = React.useMemo(() => (
@@ -1377,6 +1621,107 @@ onSend, onAbort, onSteer, onSideChat, onFollowUp, isStreaming, model, isAutoMode
       });
   }, [atTokenActive, cwd]);
 
+  // ── # session autocomplete ──────────────────────────────────────────────
+  // The composer's project root (from the catalogue) ranks that project's
+  // sessions first, as OpenCode ranks its @ session search.
+  const currentProjectRoot = React.useMemo(() => {
+    if (!cwd || !hashSessions) return undefined;
+    return hashSessions.find((s) => s.cwd === cwd)?.projectRoot ?? undefined;
+  }, [cwd, hashSessions]);
+
+  const hashMatches: SessionInfo[] = React.useMemo(() => (
+    hashQuery !== null && hashSessions
+      ? filterSessionEntries(hashSessions, hashQuery.query, HASH_RESULT_LIMIT, currentProjectRoot)
+      : []
+  ), [hashQuery, hashSessions, currentProjectRoot]);
+
+  // A query of several words that matches nothing is prose after a `#tag`, not
+  // a search: the menu closes rather than stay up (taking the arrow keys) for
+  // the rest of the line.
+  const hashGaveUp = hashQuery !== null && hashSessions !== null && hashMatches.length === 0 && /\s/.test(hashQuery.query);
+  const hashTokenKey = hashQuery === null || hashGaveUp ? null : `${hashQuery.start}:${hashQuery.query}`;
+  useEffect(() => {
+    if (hashTokenKey === null) {
+      setHashMenuOpen(false);
+      setHashActiveIndex(0);
+      return;
+    }
+    setHashMenuOpen(true);
+    setHashActiveIndex(0);
+  }, [hashTokenKey]);
+
+  // Fetch the session catalogue when the menu opens, once per component
+  // instance; the server caches its own scan.
+  useEffect(() => {
+    if (!hashMenuOpen || hashSessions !== null || hashFetchingRef.current) return;
+    hashFetchingRef.current = true;
+    setHashLoading(true);
+    fetch("/api/sessions")
+      .then((res) => {
+        if (!res.ok) throw new Error(`sessions fetch failed: ${res.status}`);
+        return res.json() as Promise<{ sessions?: SessionInfo[] }>;
+      })
+      .then((data) => setHashSessions(data.sessions ?? []))
+      .catch(() => {
+        // Leave the menu empty; the next open retries.
+      })
+      .finally(() => {
+        hashFetchingRef.current = false;
+        setHashLoading(false);
+      });
+  }, [hashMenuOpen, hashSessions]);
+
+  const applyHashCompletion = useCallback((session: SessionInfo) => {
+    if (!hashQuery) return;
+    const ta = textareaRef.current;
+    const caret = ta?.selectionStart ?? value.length;
+    // The query leaves the draft by state, not by typing it out: the chip takes
+    // its place, and a native edit here raced the controlled value (the text
+    // came back on the next render).
+    const next = `${value.slice(0, hashQuery.start)}${value.slice(caret)}`;
+    valueRef.current = next;
+    setValue(next);
+    if (ta) {
+      ta.value = next;
+      ta.setSelectionRange(hashQuery.start, hashQuery.start);
+    }
+    setHashMenuOpen(false);
+    setHashActiveIndex(0);
+    addSessionReference({
+      id: session.id,
+      title: session.name || session.firstMessage || session.id,
+      cwd: session.cwd,
+      modified: session.modified,
+    });
+  }, [hashQuery, addSessionReference, value]);
+
+  useEffect(() => {
+    if (hashActiveIndex >= hashMatches.length) {
+      setHashActiveIndex(Math.max(0, hashMatches.length - 1));
+    }
+  }, [hashMatches.length, hashActiveIndex]);
+
+  useEffect(() => {
+    hashItemRefs.current.length = hashMatches.length;
+  }, [hashMatches.length]);
+
+  useEffect(() => {
+    if (!hashMenuOpen || extensionUiOpen) return;
+    hashItemRefs.current[hashActiveIndex]?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [hashActiveIndex, hashMenuOpen, extensionUiOpen]);
+
+  useLayoutEffect(() => {
+    if (!hashMenuOpen || hashQuery === null || extensionUiOpen) {
+      setHashMenuMaxHeight(null);
+      return;
+    }
+    const menu = hashMenuRef.current;
+    if (!menu) return;
+    return subscribeUpwardMenuMaxHeight(menu, (nextHeight) => {
+      setHashMenuMaxHeight((current) => current === nextHeight ? current : nextHeight);
+    });
+  }, [hashMenuOpen, hashQuery, extensionUiOpen]);
+
   const applyAtCompletion = useCallback((entry: FileIndexEntry) => {
     if (!atQuery) return;
     const ta = textareaRef.current;
@@ -1403,6 +1748,20 @@ onSend, onAbort, onSteer, onSideChat, onFollowUp, isStreaming, model, isAutoMode
     atItemRefs.current.length = atMatches.length;
   }, [atMatches.length]);
 
+  useLayoutEffect(() => {
+    if (!argumentCompletionVisible || extensionUiOpen) {
+      setArgumentCompletionMaxHeight(null);
+      return;
+    }
+    const menu = argumentCompletionMenuRef.current;
+    if (!menu) return;
+    return subscribeUpwardMenuMaxHeight(menu, (height) => setArgumentCompletionMaxHeight((current) => current === height ? current : height));
+  }, [argumentCompletionVisible, extensionUiOpen]);
+
+  useEffect(() => {
+    if (argumentCompletionVisible) argumentCompletionItemRefs.current[argumentCompletionIndex]?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [argumentCompletionIndex, argumentCompletionVisible]);
+
   useEffect(() => {
     if (!atMenuOpen) return;
     atItemRefs.current[atActiveIndex]?.scrollIntoView({ block: "nearest", inline: "nearest" });
@@ -1423,11 +1782,99 @@ onSend, onAbort, onSteer, onSideChat, onFollowUp, isStreaming, model, isAutoMode
     historyItemRefs.current[historyActiveIndex]?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, [historyActiveIndex, historyMenuOpen, extensionUiOpen]);
 
+  const invalidateArgumentCompletion = useCallback(() => {
+    argumentCompletionRequestRef.current += 1;
+    argumentCompletionAbortRef.current?.abort();
+    argumentCompletionAbortRef.current = null;
+    argumentCompletionRequestSnapshotRef.current = null;
+    argumentCompletionSnapshotRef.current = null;
+    setArgumentCompletions([]);
+    setArgumentCaretRevision((revision) => revision + 1);
+  }, []);
+
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    setArgumentCompletions([]);
+    argumentCompletionSnapshotRef.current = null;
+    argumentCompletionAbortRef.current?.abort();
+    argumentCompletionAbortRef.current = null;
+    argumentCompletionRequestSnapshotRef.current = null;
+    if (!onGetArgumentCompletions || !draftKey || extensionUiOpen || isComposingRef.current || !textarea) return;
+    const snapshot = argumentCompletionSnapshotKey(value, textarea.selectionStart, textarea.selectionEnd, draftKey);
+    if (argumentCompletionIsSuppressed(snapshot, argumentCompletionSuppressedRef.current) || textarea.selectionStart !== textarea.selectionEnd) return;
+    const target = getArgumentCompletionTarget(value, textarea.selectionStart);
+    if (!target || !slashCommands?.some((command) => command.name === target.commandName && command.source === "extension")) return;
+    const requestId = ++argumentCompletionRequestRef.current;
+    const controller = new AbortController();
+    argumentCompletionAbortRef.current = controller;
+    argumentCompletionRequestSnapshotRef.current = snapshot;
+    const timer = window.setTimeout(() => {
+      onGetArgumentCompletions(target.commandName, target.prefix, controller.signal).then((items) => {
+        const current = textareaRef.current;
+        const currentSnapshot = current && argumentCompletionSnapshotKey(current.value, current.selectionStart, current.selectionEnd, draftKeyRef.current);
+        const isCurrentRequest = ownsArgumentCompletionRequest(
+          requestId,
+          argumentCompletionRequestRef.current,
+          controller,
+          argumentCompletionAbortRef.current,
+        );
+        if (isCurrentRequest) {
+          argumentCompletionRequestSnapshotRef.current = null;
+          argumentCompletionAbortRef.current = null;
+        }
+        if (!isCurrentRequest || controller.signal.aborted || isComposingRef.current || currentSnapshot !== snapshot) return;
+        argumentCompletionSnapshotRef.current = snapshot;
+        setArgumentCompletions(items ?? []);
+        setArgumentCompletionIndex(0);
+      }).catch(() => {
+        const isCurrentRequest = ownsArgumentCompletionRequest(
+          requestId,
+          argumentCompletionRequestRef.current,
+          controller,
+          argumentCompletionAbortRef.current,
+        );
+        if (isCurrentRequest) {
+          argumentCompletionRequestSnapshotRef.current = null;
+          argumentCompletionAbortRef.current = null;
+        }
+        if (isCurrentRequest && !controller.signal.aborted) setArgumentCompletions([]);
+      });
+    }, 100);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+      if (argumentCompletionAbortRef.current === controller) {
+        argumentCompletionAbortRef.current = null;
+        argumentCompletionRequestSnapshotRef.current = null;
+      }
+    };
+  }, [value, draftKey, slashCommands, onGetArgumentCompletions, extensionUiOpen, argumentCaretRevision]);
+
+  const applyArgumentCompletion = useCallback((item: { value: string; label: string; description?: string }) => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    const caret = textarea.selectionStart;
+    const snapshot = argumentCompletionSnapshotKey(textarea.value, caret, textarea.selectionEnd, draftKeyRef.current);
+    if (argumentCompletionSnapshotRef.current !== snapshot || caret !== textarea.selectionEnd) return;
+    const target = getArgumentCompletionTarget(textarea.value, caret);
+    if (!target) return;
+    replaceArgumentCompletion(textarea, target, item.value, draftKeyRef.current, (snapshot) => {
+      argumentCompletionSuppressedRef.current = snapshot;
+    });
+    setValue(textarea.value);
+    setArgumentCompletions([]);
+    requestAnimationFrame(() => {
+      textarea.focus();
+      autoGrowTextarea(textarea);
+    });
+  }, []);
+
   const applyHistoryInput = useCallback((text: string) => {
     setValue(text);
     setHistoryMenuOpen(false);
     setHistoryActiveIndex(0);
     setAtQuery(null);
+    setHashQuery(null);
     requestAnimationFrame(() => {
       const ta = textareaRef.current;
       if (!ta) return;
@@ -1453,16 +1900,18 @@ onSend, onAbort, onSteer, onSideChat, onFollowUp, isStreaming, model, isAutoMode
   }, []);
 
   const sendToSideChat = useCallback(() => {
-    const msg = value.trim();
-    if (!msg || attachedImages.length || !onSideChat) return;
+    const text = value.trim();
+    if (!text || attachedImages.length || !onSideChat) return;
     clearInput();
-    onSideChat(msg);
+    onSideChat(withSessionReferences(text, attachedReferencesRef.current));
   }, [value, attachedImages, onSideChat, clearInput]);
 
   const sendQueued = useCallback((mode: "steer" | "followup") => {
-    const msg = value.trim();
+    const text = value.trim();
+    // A steer or follow-up carries the chips too: clearInput() drops them.
+    const msg = withSessionReferences(text, attachedReferencesRef.current);
     if (!msg && !attachedImages.length) return;
-    if (msg.startsWith("!") && !attachedImages.length) {
+    if (text.startsWith("!") && !attachedImages.length) {
       // A shell command is never steered into the run as text.
       void handleSend();
       return;
@@ -1563,6 +2012,46 @@ onSend, onAbort, onSteer, onSideChat, onFollowUp, isStreaming, model, isAutoMode
         return;
       }
 
+      if (e.key === "Escape" && !isComposing && !extensionUiOpen) {
+        const textarea = textareaRef.current;
+        const target = textarea && getArgumentCompletionTarget(textarea.value, textarea.selectionStart);
+        const snapshot = textarea && argumentCompletionSnapshotKey(textarea.value, textarea.selectionStart, textarea.selectionEnd, draftKeyRef.current);
+        const commandHasCompleter = target && onGetArgumentCompletions
+          && slashCommands?.some((command) => command.name === target.commandName && command.source === "extension");
+        const visibleResults = Boolean(snapshot && argumentCompletionSnapshotRef.current === snapshot && argumentCompletions.length > 0);
+        const ownsArgumentCompletion = argumentCompletionOwnsEscape({
+          visibleResults,
+          pendingRequest: Boolean(commandHasCompleter && argumentCompletionRequestSnapshotRef.current === snapshot && argumentCompletionAbortRef.current),
+          snapshot,
+          suppressedSnapshot: argumentCompletionSuppressedRef.current,
+        });
+        if (ownsArgumentCompletion) {
+          e.preventDefault();
+          if (snapshot) argumentCompletionSuppressedRef.current = snapshot;
+          invalidateArgumentCompletion();
+          return;
+        }
+      }
+
+      const textarea = textareaRef.current;
+      const currentArgumentSnapshot = textarea && argumentCompletionSnapshotKey(textarea.value, textarea.selectionStart, textarea.selectionEnd, draftKeyRef.current);
+      const hasCurrentArgumentResults = Boolean(currentArgumentSnapshot
+        && argumentCompletionSnapshotRef.current === currentArgumentSnapshot
+        && argumentCompletions.length > 0);
+      if (hasCurrentArgumentResults && !extensionUiOpen && !isComposing) {
+        if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+          e.preventDefault();
+          const delta = e.key === "ArrowDown" ? 1 : -1;
+          setArgumentCompletionIndex((index) => (index + delta + argumentCompletions.length) % argumentCompletions.length);
+          return;
+        }
+        if ((e.key === "Tab" || acceptShortcut) && argumentCompletions[argumentCompletionIndex]) {
+          e.preventDefault();
+          applyArgumentCompletion(argumentCompletions[argumentCompletionIndex]);
+          return;
+        }
+      }
+
       if (historyMenuOpen && !extensionUiOpen && !isComposing) {
         if (e.key === "ArrowDown") {
           e.preventDefault();
@@ -1655,10 +2144,35 @@ onSend, onAbort, onSteer, onSideChat, onFollowUp, isStreaming, model, isAutoMode
         }
       }
 
+      // # session menu — mirrors the @ file menu; skip while composing.
+      if (hashMenuOpen && hashQuery !== null && !extensionUiOpen && !isComposing) {
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          setHashActiveIndex((i) => cycleListIndex(i, hashMatches.length, 1));
+          return;
+        }
+        if (e.key === "ArrowUp") {
+          e.preventDefault();
+          setHashActiveIndex((i) => cycleListIndex(i, hashMatches.length, -1));
+          return;
+        }
+        if (e.key === "Escape") {
+          e.preventDefault();
+          setHashMenuOpen(false);
+          return;
+        }
+        if ((e.key === "Tab" || acceptShortcut) && hashMatches[hashActiveIndex]) {
+          e.preventDefault();
+          void applyHashCompletion(hashMatches[hashActiveIndex]);
+          return;
+        }
+      }
+
       if (e.key === "ArrowUp" && !isComposing && !isStreaming && inputHistory.length > 0 && value.trim().length === 0) {
         e.preventDefault();
         setSlashMenuOpen(false);
         setAtMenuOpen(false);
+        setHashMenuOpen(false);
         setHistoryActiveIndex(inputHistory.length - 1);
         setHistoryMenuOpen(true);
         return;
@@ -1680,7 +2194,7 @@ onSend, onAbort, onSteer, onSideChat, onFollowUp, isStreaming, model, isAutoMode
         }
       }
     },
-    [isMobile, enterSendMode, isStreaming, onSteer, onFollowUp, onAbort, extensionUiOpen, slashMenuOpen, slashQuery, displayedSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value]
+    [isMobile, enterSendMode, isStreaming, onSteer, onFollowUp, onAbort, extensionUiOpen, argumentCompletions, argumentCompletionIndex, applyArgumentCompletion, onGetArgumentCompletions, slashCommands, invalidateArgumentCompletion, slashMenuOpen, slashQuery, displayedSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, hashMenuOpen, hashQuery, hashMatches, hashActiveIndex, applyHashCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value]
   );
 
   const handleInput = useCallback(() => {
@@ -1742,12 +2256,13 @@ onSend, onAbort, onSteer, onSideChat, onFollowUp, isStreaming, model, isAutoMode
     setValue(nextValue);
     setHistoryMenuOpen(false);
     updateAtQuery(nextValue, start + markdown.length);
+    updateHashQuery(nextValue, start + markdown.length);
     requestAnimationFrame(() => {
       ta.focus();
       ta.setSelectionRange(start + markdown.length, start + markdown.length);
       scrollTextareaCaretIntoView(ta);
     });
-  }, [compact, processImageFiles, updateAtQuery]);
+  }, [compact, processImageFiles, updateAtQuery, updateHashQuery]);
 
   useEffect(() => {
     if (slashQuery === null) {
@@ -1849,7 +2364,7 @@ onSend, onAbort, onSteer, onSideChat, onFollowUp, isStreaming, model, isAutoMode
     ? Math.max(0, compactResult.tokensBefore - compactResult.estimatedTokensAfter)
     : 0;
   const compactResultText = compactResult
-    ? `${compactResult.reason && compactResult.reason !== "manual" ? `${compactResult.reason[0].toUpperCase()}${compactResult.reason.slice(1)} ` : t("chat.compacted")} ${formatTokenCount(compactResult.tokensBefore)} -> ${formatTokenCount(compactResult.estimatedTokensAfter)} tokens (${t("chat.tokensSaved", { saved: formatTokenCount(compactSavedTokens) })})`
+    ? `${compactResult.reason && compactResult.reason !== "manual" ? `${compactResult.reason[0].toUpperCase()}${compactResult.reason.slice(1)} ` : t("chat.compacted")} ${formatCompactCount(compactResult.tokensBefore)} -> ${formatCompactCount(compactResult.estimatedTokensAfter)} tokens (${t("chat.tokensSaved", { saved: formatCompactCount(compactSavedTokens) })})`
     : null;
   const resolvedThinkingLevel = thinkingLevel && thinkingLevel !== "auto" ? thinkingLevel : null;
   const thinkingDisplayLabel = (() => {
@@ -2069,6 +2584,47 @@ onSend, onAbort, onSteer, onSideChat, onFollowUp, isStreaming, model, isAutoMode
             {onDismissCompactError && <DismissButton onClick={onDismissCompactError} title={t("chat.dismissCompactError")} />}
           </div>
         )}
+        {/* Quoted sessions: chips beside the attachments, removed with the × */}
+        {attachedReferences.length > 0 && (
+          <div style={{ display: "flex", gap: 6, marginBottom: 6, flexWrap: "wrap" }}>
+            {attachedReferences.map((reference) => (
+              <span
+                key={reference.id}
+                title={referenceTooltip(reference)}
+                style={{
+                  display: "flex", alignItems: "center", gap: 4,
+                  maxWidth: 260, padding: "3px 4px 3px 7px",
+                  border: "1px solid rgba(59,130,246,0.28)", borderRadius: 6,
+                  background: "color-mix(in srgb, var(--accent) 8%, var(--bg-panel))",
+                  color: "var(--text)", fontSize: 12,
+                }}
+              >
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, color: "var(--accent)" }} aria-hidden="true">
+                  <path d="M8 8h8M8 12h8M8 16h5" /><rect x="4" y="4" width="16" height="16" rx="2" />
+                </svg>
+                <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {referenceTitle(reference)}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => removeSessionReference(reference.id)}
+                  aria-label={t("chat.removeReference")}
+                  title={t("chat.removeReference")}
+                  style={{
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    width: 16, height: 16, flexShrink: 0, padding: 0,
+                    border: "none", borderRadius: 4, background: "none",
+                    color: "var(--text-dim)", cursor: "pointer",
+                  }}
+                >
+                  <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+                    <line x1="1" y1="1" x2="7" y2="7" /><line x1="7" y1="1" x2="1" y2="7" />
+                  </svg>
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
         {/* Image previews */}
         {attachedImages.length > 0 && (
           <div style={{ display: "flex", gap: 6, marginBottom: 6, flexWrap: "wrap" }}>
@@ -2191,41 +2747,33 @@ onSend, onAbort, onSteer, onSideChat, onFollowUp, isStreaming, model, isAutoMode
               </div>
             </div>
           )}
+          {argumentCompletionVisible && !extensionUiOpen && (
+            <div ref={argumentCompletionMenuRef} role="listbox" aria-label={t("chat.slashCommands", { label: slashCommandCountLabel })} style={{ ...paletteShellStyle(argumentCompletionMaxHeight === null ? "min(48vh, 360px)" : `min(48vh, 360px, ${argumentCompletionMaxHeight}px)`), zIndex: 121 }}>
+              <div style={paletteHeaderStyle()}>
+                <span>{t("chat.slashCommands", { label: argumentCompletions.length === 1 ? t("chat.match") : t("chat.matches", { count: argumentCompletions.length }) })}</span>
+                <span style={{ fontFamily: "var(--font-mono)" }}>{t("chat.tabEnter")}</span>
+              </div>
+              <div style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto", padding: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+                {argumentCompletions.map((item, index) => (
+                  <button key={`${item.value}:${index}`} ref={(node) => { argumentCompletionItemRefs.current[index] = node; }} type="button" role="option" aria-selected={index === argumentCompletionIndex}
+                    onMouseDown={(event) => { event.preventDefault(); applyArgumentCompletion(item); }}
+                    onMouseEnter={() => setArgumentCompletionIndex(index)}
+                    style={paletteCardStyle(index === argumentCompletionIndex)}>
+                    <span style={{ fontSize: 13, overflowWrap: "anywhere", wordBreak: "break-word" }}>{item.label}</span>
+                    {item.description && <span style={{ color: "var(--text-dim)", fontSize: 11, lineHeight: 1.35 }}>{item.description}</span>}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           {slashMenuOpen && slashQuery !== null && !extensionUiOpen && (
             <div
               ref={slashMenuRef}
-              style={{
-                position: "absolute",
-                left: 0,
-                right: 0,
-                bottom: "calc(100% + 8px)",
-                zIndex: 120,
-                background: "var(--bg)",
-                border: "1px solid var(--border)",
-                borderRadius: 8,
-                boxShadow: "0 -6px 20px rgba(0,0,0,0.12)",
-                overflow: "hidden",
-                boxSizing: "border-box",
-                display: "flex",
-                flexDirection: "column",
-                maxHeight: slashMenuMaxHeight === null
-                  ? "min(72.8vh, 598px)"
-                  : `min(72.8vh, 598px, ${slashMenuMaxHeight}px)`,
-              }}
+              style={paletteShellStyle(slashMenuMaxHeight === null
+                ? "min(72.8vh, 598px)"
+                : `min(72.8vh, 598px, ${slashMenuMaxHeight}px)`)}
             >
-              <div
-                style={{
-                  padding: "8px 10px",
-                  borderBottom: "1px solid var(--border)",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  gap: 8,
-                  fontSize: 11,
-                  color: "var(--text-dim)",
-                  flexShrink: 0,
-                }}
-              >
+              <div style={paletteHeaderStyle()}>
                  <span>{slashCommandsLoading ? t("chat.loadingCommands") : t("chat.slashCommands", { label: slashCommandCountLabel })}</span>
                  <span style={{ fontFamily: "var(--font-mono)" }}>{t("chat.tabEnter")}</span>
               </div>
@@ -2283,18 +2831,7 @@ onSend, onAbort, onSteer, onSideChat, onFollowUp, isStreaming, model, isAutoMode
                                 width: "100%",
                                 minWidth: 0,
                                 minHeight: 58,
-                                display: "flex",
-                                flexDirection: "column",
-                                gap: 4,
-                                justifyContent: "center",
-                                padding: "9px 10px",
-                                border: `1px solid ${active ? "var(--accent)" : "var(--border)"}`,
-                                borderRadius: 7,
-                                background: active ? "var(--bg-selected)" : "var(--bg-panel)",
-                                color: "var(--text)",
-                                cursor: "pointer",
-                                textAlign: "left",
-                                boxShadow: active ? "0 0 0 1px color-mix(in srgb, var(--accent) 28%, transparent)" : "none",
+                                ...paletteCardStyle(active),
                               }}
                             >
                               <span style={{
@@ -2446,6 +2983,110 @@ onSend, onAbort, onSteer, onSideChat, onFollowUp, isStreaming, model, isAutoMode
               </div>
             );
           })()}
+          {hashMenuOpen && hashQuery !== null && !extensionUiOpen && (() => {
+            const loading = hashLoading && hashSessions === null;
+            const matchCountLabel = hashMatches.length === 1 ? t("chat.match") : t("chat.matches", { count: hashMatches.length });
+            return (
+              <div
+                ref={hashMenuRef}
+                style={{
+                  position: "absolute",
+                  left: 0,
+                  right: 0,
+                  bottom: "calc(100% + 8px)",
+                  zIndex: 120,
+                  background: "var(--bg)",
+                  border: "1px solid var(--border)",
+                  borderRadius: 8,
+                  boxShadow: "0 -6px 20px rgba(0,0,0,0.12)",
+                  overflow: "hidden",
+                  boxSizing: "border-box",
+                  display: "flex",
+                  flexDirection: "column",
+                  maxHeight: hashMenuMaxHeight === null
+                    ? "min(48vh, 400px)"
+                    : `min(48vh, 400px, ${hashMenuMaxHeight}px)`,
+                }}
+              >
+                <div
+                  style={{
+                    padding: "8px 10px",
+                    borderBottom: "1px solid var(--border)",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 8,
+                    fontSize: 11,
+                    color: "var(--text-dim)",
+                    flexShrink: 0,
+                  }}
+                >
+                  <span>
+                    {loading
+                      ? t("chat.loadingSessions")
+                      : t("chat.sessions", { label: matchCountLabel })}
+                  </span>
+                  <span style={{ fontFamily: "var(--font-mono)" }}>{t("chat.tabEnter")}</span>
+                </div>
+                <div style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto", padding: 4 }}>
+                  {!loading && hashMatches.length === 0 ? (
+                    <div style={{ padding: "6px 8px", fontSize: 12, color: "var(--text-dim)" }}>
+                      {t("chat.noMatchingSessions")}
+                    </div>
+                  ) : (
+                    hashMatches.map((session, index) => {
+                      const active = index === hashActiveIndex;
+                      const title = session.name || session.firstMessage || session.id;
+                      const cwdBase = session.cwd.split(/[\\/]/).pop() || session.cwd;
+                      return (
+                        <button
+                          key={session.id}
+                          ref={(node) => {
+                            hashItemRefs.current[index] = node;
+                          }}
+                          type="button"
+                          onMouseDown={(e) => {
+                            e.preventDefault();
+                            void applyHashCompletion(session);
+                          }}
+                          onMouseEnter={() => setHashActiveIndex(index)}
+                          style={{
+                            width: "100%",
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: 2,
+                            padding: "6px 8px",
+                            border: "none",
+                            borderRadius: 6,
+                            background: active ? "var(--bg-selected)" : "none",
+                            color: "var(--text)",
+                            cursor: "pointer",
+                            textAlign: "left",
+                            fontSize: 12.5,
+                          }}
+                        >
+                          <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {title}
+                          </span>
+                          <span style={{
+                            minWidth: 0,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                            fontSize: 11,
+                            color: "var(--text-dim)",
+                            fontFamily: "var(--font-mono)",
+                          }}>
+                            {cwdBase} · {formatShortRelativeTime(session.modified, locale)}
+                          </span>
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+            );
+          })()}
           <div
             className={stackedComposer ? undefined : "chat-composer-row"}
             style={{
@@ -2471,23 +3112,33 @@ onSend, onAbort, onSteer, onSideChat, onFollowUp, isStreaming, model, isAutoMode
             value={value}
             onChange={(e) => {
               valueRef.current = e.target.value;
+              argumentCompletionSuppressedRef.current = null;
+              invalidateArgumentCompletion();
               setValue(e.target.value);
               setHistoryMenuOpen(false);
               updateAtQuery(e.target.value, e.target.selectionStart);
+              updateHashQuery(e.target.value, e.target.selectionStart);
             }}
             onSelect={(e) => {
               const el = e.currentTarget;
+              invalidateArgumentCompletion();
               updateAtQuery(el.value, el.selectionStart);
+              updateHashQuery(el.value, el.selectionStart);
             }}
             onKeyDown={handleKeyDown}
             onCompositionStart={() => {
               isComposingRef.current = true;
+              invalidateArgumentCompletion();
             }}
             onCompositionEnd={(e) => {
               isComposingRef.current = false;
+              argumentCompletionSuppressedRef.current = null;
               lastCompositionEndAtRef.current = Date.now();
               const el = e.currentTarget;
+              setValue(el.value);
+              invalidateArgumentCompletion();
               updateAtQuery(el.value, el.selectionStart);
+              updateHashQuery(el.value, el.selectionStart);
             }}
             onInput={handleInput}
             onPaste={handlePaste}

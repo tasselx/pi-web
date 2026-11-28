@@ -15,6 +15,7 @@ export interface BashResultLike {
   cancelled?: boolean;
   truncated?: boolean;
   fullOutputPath?: string;
+  fullOutputError?: string;
 }
 
 export interface ContextUsage {
@@ -91,6 +92,9 @@ interface ResourceLoaderLike {
 }
 
 interface ExtensionRunnerLike {
+  getCommand(name: string): {
+    getArgumentCompletions?: (prefix: string) => Array<{ value: string; label: string; description?: string }> | null | Promise<Array<{ value: string; label: string; description?: string }> | null>;
+  } | undefined;
   getRegisteredCommands(): Array<{
     invocationName: string;
     description?: string;
@@ -180,6 +184,10 @@ export interface AgentSessionLike {
       /** The declared tools, with the descriptions `prepareLoadout` hooks set for the model. */
       readonly tools?: readonly { readonly name: string; readonly description: string; readonly executionMode?: "parallel" | "sequential" }[];
     };
+    /** How many queued steers a turn takes; the SDK reads it from settings at creation and reload. */
+    steeringMode?: "all" | "one-at-a-time";
+    /** How many queued follow-ups a turn takes, read like `steeringMode`. */
+    followUpMode?: "all" | "one-at-a-time";
     /** Steers and follow-ups pi has queued, its custom messages included (`getSteeringMessages()` lists texts only). */
     hasQueuedMessages(): boolean;
     /** The current run's abort signal; Stop aborts it. */
@@ -210,6 +218,7 @@ export interface AgentSessionLike {
     deliverAs?: "steer" | "followUp" | "nextTurn";
   }): Promise<void>;
   abort(): Promise<void>;
+  waitForIdle(): Promise<void>;
   executeBash(command: string, onChunk?: (chunk: string) => void, options?: {
     excludeFromContext?: boolean;
     operations?: BashOperations;

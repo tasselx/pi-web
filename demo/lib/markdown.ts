@@ -47,9 +47,14 @@ export function markdownAppUrlTransform(value: string): string {
   return appLinkPattern.test(value) ? value : defaultUrlTransform(value);
 }
 
-/** Also keeps `file:` links, for renderers that open local files in the app. */
+// A bare file name with a line suffix (`app.ts:42`): isBareFileLineHref() in
+// lib/file-links.ts, repeated because this module imports no local one.
+const BARE_FILE_LINE_HREF = /^[^\s/:?#]+\.[a-zA-Z0-9]+:\d+(?:[:-]\d+)?(?:[?#]|$)/;
+
+/** Also keeps `file:` links and bare file names with a line suffix, for
+ *  renderers that open local files in the app. */
 export function markdownUrlTransform(value: string): string {
-  return /^file:/i.test(value) ? value : markdownAppUrlTransform(value);
+  return /^file:/i.test(value) || BARE_FILE_LINE_HREF.test(value) ? value : markdownAppUrlTransform(value);
 }
 
 /** A link that leaves the page: it names a scheme or another host. */

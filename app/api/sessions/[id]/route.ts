@@ -9,7 +9,7 @@ import {
   invalidateSessionManagerCache,
   buildSessionContext,
 } from "@/lib/session-reader";
-import { getRpcSession, renameRpcSession, subagentDisplayStatus } from "@/lib/rpc-manager";
+import { getLiveRpcSession, renameRpcSession, subagentDisplayStatus } from "@/lib/rpc-manager";
 import { projectTreeForResponse, toSummaryTree } from "@/lib/project-tree";
 import { computeSessionTotalActiveMs } from "@/lib/session-timing";
 import { computeSessionStats } from "@/lib/session-stats";
@@ -30,7 +30,6 @@ export async function GET(
   const perf = startServerPerf("GET /api/sessions/[id]");
   try {
     perf?.span("resolve");
-    const rpc = getRpcSession(id);
     const searchParams = new URL(req.url).searchParams;
     const force = searchParams.get("force") === "1";
 
@@ -39,7 +38,7 @@ export async function GET(
     // stays stale. Only probe on ?force=1 (session mount / page refresh): two
     // processes writing one JSONL is unsupported, so post-turn reads must not
     // scan disk. Eviction is idle-only; mid-run the wrapper owns the write path.
-    let liveWrapper = rpc?.isAlive() ? rpc : undefined;
+    let liveWrapper = getLiveRpcSession(id);
     let wrapperRebuilt = false;
     if (force && liveWrapper?.evictIfDiskAhead()) {
       wrapperRebuilt = true;
@@ -65,7 +64,7 @@ export async function GET(
     const deferToolResultImages = searchParams.has("deferMedia");
     const rawTail = Number(searchParams.get("tail"));
     const tail = Number.isFinite(rawTail) && rawTail > 0 ? Math.min(rawTail, 1000) : 50;
-    // pi's showCacheMissNotices (#1265): cache, cost and provider notices on the messages they follow.
+    // pi's notices.* (#1265): cache, cost and provider notices on the messages they follow.
     const transcriptNotices = readSessionTranscriptNotices({
       entries: entries as unknown as SessionEntry[],
       cwd: sm.getHeader()?.cwd ?? "",

@@ -25,6 +25,7 @@ import {
   SUBAGENT_RESULT_TYPE,
   selectSubagentExtensionTools,
   settleOrphanedSubagentStatus,
+  configuredPackageRoots,
   subagentExtensionLoaderOptions,
   subagentToolOptions,
   withSubagentExtensionTools,
@@ -47,6 +48,7 @@ import { SubagentQueue } from "./subagent-queue";
 import { addWorktree, removeWorktree } from "./worktree";
 import { randomUUID } from "node:crypto";
 import { existsSync, writeFileSync } from "node:fs";
+import { isThinkingLevel } from "./thinking-levels";
 
 interface HostSession {
   readonly inner: AgentSessionLike;
@@ -55,6 +57,7 @@ interface HostSession {
   isAlive(): boolean;
   isRunning(): boolean;
   waitUntilReady(): Promise<void>;
+  waitForCompactionContinuation?(): Promise<void> | undefined;
   /**
    * Connect the session's MCP servers before a run prompts the SDK session directly, past the
    * wrapper's `send()`; false when Stop or `signal` ended the wait and the run must not start.
@@ -115,7 +118,6 @@ declare global {
 }
 const SUBAGENT_CONTEXT_LIMIT = 50_000;
 const PARENT_IDLE_POLL_MS = 200;
-const THINKING_LEVELS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
 /**
  * A run prompts the SDK session its wrapper held at dispatch. The wrapper is idle while the run
@@ -498,8 +500,8 @@ export function parseSubagentModel(runtime: ModelRuntime, value: string | undefi
   const exact = findSubagentModel(runtime, requested);
   if (exact) return { model: exact };
   const colon = requested.lastIndexOf(":");
-  const level = requested.slice(colon + 1) as ThinkingLevel;
-  if (colon > 0 && THINKING_LEVELS.has(level)) {
+  const level = requested.slice(colon + 1);
+  if (colon > 0 && isThinkingLevel(level)) {
     const model = findSubagentModel(runtime, requested.slice(0, colon));
     if (model) return { model, thinkingLevel: level };
   }
@@ -685,7 +687,7 @@ export function createSubagentController(
         modelRuntime: parentModelRuntime,
         settingsManager,
         resourceLoaderOptions: {
-          ...subagentExtensionLoaderOptions({ ...profile, mcp: mcpEnabled }),
+          ...subagentExtensionLoaderOptions({ ...profile, mcp: mcpEnabled }, configuredPackageRoots(childCwd, agentDir, settingsManager)),
           ...skillsBinding.loaderOptions,
           ...(extensionFactories.length > 0 ? { extensionFactories } : {}),
           noPromptTemplates: true,
@@ -765,7 +767,7 @@ export function createSubagentController(
         ?? profile.thinking
         ?? profileModel?.thinkingLevel
         ?? parent.inner.agent.state?.thinkingLevel;
-      if (thinking && !THINKING_LEVELS.has(thinking as ThinkingLevel)) {
+      if (thinking && !isThinkingLevel(thinking)) {
         throw new Error(`Invalid subagent thinking level: ${thinking}`);
       }
       const parentModel = parent.inner.model as ReturnType<ModelRuntime["getModel"]>;
@@ -851,6 +853,8 @@ export function createSubagentController(
           if (childSession && !childSession.isAlive()) throw new Error(CLOSED_BEFORE_RUN);
           await prepareChildMcp(childSession, stored);
           await inner.prompt(delegatedTask, { source: "rpc" });
+          const continuation = childSession?.waitForCompactionContinuation?.();
+          if (continuation) await continuation;
           const text = runResultText(sessionManager, runStart);
           const stop = stored.abortRequested ? undefined : lastAssistantStop(sessionManager);
           const aborted = stored.abortRequested || stop?.aborted === true;
@@ -1034,6 +1038,8 @@ export function createSubagentController(
         if (!wrapper!.isAlive()) throw new Error(CLOSED_BEFORE_RUN);
         await prepareChildMcp(wrapper, stored);
         await wrapper!.inner.prompt(request.task, { source: "rpc" });
+        const continuation = wrapper!.waitForCompactionContinuation?.();
+        if (continuation) await continuation;
         const text = runResultText(manager, runStart);
         const stop = stored.abortRequested ? undefined : lastAssistantStop(manager);
         const aborted = stored.abortRequested || stop?.aborted === true;

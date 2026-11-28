@@ -42,14 +42,31 @@ const markdownSanitizeSchema = {
   strip: [...(defaultSchema.strip || []), "iframe", "object", "style", "form"],
 };
 
-/** react-markdown's URL filter, plus links to the apps above. */
-export function markdownAppUrlTransform(value: string): string {
-  return appLinkPattern.test(value) ? value : defaultUrlTransform(value);
+/**
+ * react-markdown's URL filter, plus links to the apps above. A URL it refuses
+ * leaves no attribute, as the sanitizer's refusals do: react-markdown's own
+ * filter writes `href=""`, a link to Pi Web itself that the chat opens in a
+ * new tab.
+ */
+export function markdownAppUrlTransform(value: string): string | undefined {
+  if (appLinkPattern.test(value)) return value;
+  const safe = defaultUrlTransform(value);
+  return safe || !value ? safe : undefined;
 }
 
-/** Also keeps `file:` links, for renderers that open local files in the app. */
-export function markdownUrlTransform(value: string): string {
-  return /^file:/i.test(value) ? value : markdownAppUrlTransform(value);
+// A bare file name with a line suffix (`app.ts:42`): isBareFileLineHref() in
+// lib/file-links.ts, repeated because this module imports no local one (its
+// tests load it without a bundler).
+const BARE_FILE_LINE_HREF = /^[^\s/:?#]+\.[a-zA-Z0-9]+:\d+(?:[:-]\d+)?(?:[?#]|$)/;
+
+/**
+ * Also keeps `file:` links and a bare file name with a line suffix
+ * (`app.ts:42`, which reads as a scheme), for renderers that open local files
+ * in the app. The sanitizer lets the bare form through to this filter
+ * (`rehypeProtectBareFileLinks`).
+ */
+export function markdownUrlTransform(value: string): string | undefined {
+  return /^file:/i.test(value) || BARE_FILE_LINE_HREF.test(value) ? value : markdownAppUrlTransform(value);
 }
 
 /** A link that leaves the page: it names a scheme or another host. */
@@ -138,6 +155,11 @@ function rewriteEscapedInlineCodeBackticks(line: string): string {
   });
 }
 
+// A code span on one line: a whole backtick run, then content, then a run of
+// the same length that no further backtick follows. The character before the
+// opening run is kept (no lookbehind, see AGENTS.md).
+const inlineCodeSpanPattern = /(^|[^`])(`+)(?!`)[^\n]*?[^`\n]\2(?!`)/g;
+
 export function normalizeDisplayMath(markdown: string): string {
   const lineBreak = markdown.includes("\r\n") ? "\r\n" : "\n";
   const lines = markdown.split(/\r?\n/);
@@ -172,7 +194,12 @@ export function normalizeDisplayMath(markdown: string): string {
       continue;
     }
 
-    const rawCodeOpen = line.match(/<(code|pre|script|style)\b/i);
+    // A tag named in inline code (`<pre>`) is text, not raw HTML: only a tag
+    // outside a code span opens a raw block, as in splitMarkdownBlocks(). The
+    // spans are blanked, not removed, so the closing tag is looked for in the
+    // line as written: backticks after a raw tag do not make a code span.
+    const prose = line.replace(inlineCodeSpanPattern, (span, before: string) => before + " ".repeat(span.length - before.length));
+    const rawCodeOpen = prose.match(/<(code|pre|script|style)\b/i);
     if (rawCodeOpen) {
       const tag = rawCodeOpen[1].toLowerCase();
       const remainder = line.slice((rawCodeOpen.index ?? 0) + rawCodeOpen[0].length);
@@ -759,6 +786,40 @@ function rehypeMatchClobberedIds(): (tree: unknown) => void {
   };
 }
 
+// rehype-sanitize reads `app.ts:42` as the unknown scheme `app.ts:` and drops
+// the href before the URL filter, which alone knows whether the renderer opens
+// local files. The bare form goes through the sanitizer behind an allowed
+// `file:` prefix and comes back right after it; only hrefs that are the bare
+// form are restored, so the prefix cannot unwrap anything else.
+const BARE_FILE_LINE_PROTECTED = "file:bare-file-line:";
+
+function rewriteHrefs(rewrite: (href: string) => string): () => (tree: unknown) => void {
+  return () => (tree: unknown): void => {
+    const visit = (node: SanitizedNode): void => {
+      if (!node || typeof node !== "object") return;
+      const href = node.properties?.href;
+      if (node.type === "element" && typeof href === "string") node.properties!.href = rewrite(href);
+      for (const child of node.children ?? []) visit(child);
+    };
+    visit(tree as SanitizedNode);
+  };
+}
+
+const rehypeProtectBareFileLinks = rewriteHrefs((href) => (
+  BARE_FILE_LINE_HREF.test(href) ? BARE_FILE_LINE_PROTECTED + href : href
+));
+
+const rehypeRestoreBareFileLinks = rewriteHrefs((href) => {
+  const bare = href.startsWith(BARE_FILE_LINE_PROTECTED) ? href.slice(BARE_FILE_LINE_PROTECTED.length) : "";
+  return BARE_FILE_LINE_HREF.test(bare) ? bare : href;
+});
+
+const markdownSanitizePlugins: NonNullable<ReactMarkdownOptions["rehypePlugins"]> = [
+  rehypeProtectBareFileLinks,
+  [rehypeSanitize, markdownSanitizeSchema],
+  rehypeRestoreBareFileLinks,
+];
+
 function hastText(node: HastContent): string {
   return node.type === "text" ? node.value : node.type === "element" ? node.children.map(hastText).join("") : "";
 }
@@ -796,7 +857,7 @@ function rehypeDisplayMathSource() {
 
 export const markdownRehypePlugins: ReactMarkdownOptions["rehypePlugins"] = [
   rehypeRaw,
-  [rehypeSanitize, markdownSanitizeSchema],
+  ...markdownSanitizePlugins,
   rehypeMatchClobberedIds,
   rehypeDisplayMathSource,
   [rehypeKatex, { throwOnError: false, strict: false }],
@@ -829,7 +890,7 @@ function markdownHeadingAnchors() {
 // Anchors come before KaTeX, which writes each formula's text twice.
 export const markdownDocumentRehypePlugins: ReactMarkdownOptions["rehypePlugins"] = [
   rehypeRaw,
-  [rehypeSanitize, markdownSanitizeSchema],
+  ...markdownSanitizePlugins,
   markdownHeadingAnchors,
   rehypeDisplayMathSource,
   [rehypeKatex, { throwOnError: false, strict: false }],
@@ -837,7 +898,7 @@ export const markdownDocumentRehypePlugins: ReactMarkdownOptions["rehypePlugins"
 
 export const markdownPreviewRehypePlugins: ReactMarkdownOptions["rehypePlugins"] = [
   rehypeRaw,
-  [rehypeSanitize, markdownSanitizeSchema],
+  ...markdownSanitizePlugins,
   rehypeMatchClobberedIds,
   [rehypeKatex, { throwOnError: false, strict: false }],
 ];

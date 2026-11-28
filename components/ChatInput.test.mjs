@@ -13,6 +13,7 @@ const React = await jiti.import("react");
 const { renderToStaticMarkup } = await jiti.import("react-dom/server");
 const { ChatInput, ModelErrorBanner, ModelScopeWarningBanner, RUN_END_CLICK_GUARD_MS, autoGrowTextarea, scrollTextareaCaretIntoView, canClearBuiltinCommandInput, canRestoreUserMessage, canRunBuiltinSlashCommandWhileStreaming, cycleListIndex, filterModelOptions, getUpwardMenuMaxHeight, getUserMessageText, getUserMessageDraftImages, isExactSlashCommand, isRunEndStrayClick, modelSupportsImageInput, offersBuiltinSlashCommandWhileStreaming, replaceLinksWithMarkdown, readImageFile, replaceTextareaRange, stacksComposerLayout, submitsSlashCommandOnEnter } = await jiti.import("./ChatInput.tsx");
 const { isBareMcpCommand } = await jiti.import("@/lib/mcp-command");
+const { withSessionReferences } = await jiti.import("@/lib/session-reference-target");
 const { ModelSelector } = await jiti.import("./ModelSelector.tsx");
 // As ChatInput.tsx imports it: on Windows jiti loads "@/lib/draft-store.ts"
 // as a second copy, and ChatInput would never see the drafts set here (#1211).
@@ -101,6 +102,8 @@ test("follow-up shortcuts preserve newline, IME, mobile and completion behavior"
     ["an open extension dialog hides slash completion", {}, { isStreaming: false, extensionUiOpen: true, slashMenuOpen: true, slashQuery: "help" }, "send"],
     ["an open extension dialog hides file completion", {}, { isStreaming: false, extensionUiOpen: true, atMenuOpen: true, atQuery: {} }, "send"],
     ["an open extension dialog hides history selection", {}, { isStreaming: false, extensionUiOpen: true, historyMenuOpen: true }, "send"],
+    ["session completion takes priority", { key: "Tab" }, { hashMenuOpen: true, hashQuery: {}, hashMatches: [{}] }, "hash"],
+    ["an open extension dialog hides session completion", { key: "Tab" }, { extensionUiOpen: true, hashMenuOpen: true, hashQuery: {}, hashMatches: [{}] }, "native"],
   ];
   for (const [name, keys, state, expected] of cases) {
     let action = "native";
@@ -112,7 +115,10 @@ test("follow-up shortcuts preserve newline, IME, mobile and completion behavior"
       extensionUiOpen: false,
       historyMenuOpen: false, inputHistory: ["previous"], historyActiveIndex: 0,
       slashMenuOpen: false, slashQuery: null, displayedSlashCommands: [{}], slashActiveIndex: 0,
+      argumentCompletions: [], argumentCompletionIndex: 0, applyArgumentCompletion() {},
+      textareaRef: { current: null },
       atMenuOpen: false, atQuery: null, atMatches: [{}], atActiveIndex: 0,
+      hashMenuOpen: false, hashQuery: null, hashMatches: [], hashActiveIndex: 0, applyHashCompletion() { action = "hash"; },
       onSteer() {}, onFollowUp() {},
       sendQueued(mode) { action = mode; }, handleSend() { action = "send"; },
       applySlashCommand() { action = "slash"; },
@@ -254,7 +260,7 @@ test("a plain-text paste the browser dropped is inserted from the event's own te
           };
         }
       },
-      valueRef: { current: "" }, setValue() {}, setHistoryMenuOpen() {}, updateAtQuery() {}, requestAnimationFrame() {},
+      valueRef: { current: "" }, setValue() {}, setHistoryMenuOpen() {}, updateAtQuery() {}, updateHashQuery() {}, requestAnimationFrame() {},
     });
     const nativeEvent = { defaultPrevented: false };
     handler({
@@ -305,7 +311,10 @@ test("file mention arrows wrap around the match list", () => {
       extensionUiOpen: false,
       historyMenuOpen: false, inputHistory: [], historyActiveIndex: 0,
       slashMenuOpen: false, slashQuery: null, displayedSlashCommands: [], slashActiveIndex: 0,
+      argumentCompletions: [], argumentCompletionIndex: 0, applyArgumentCompletion() {},
+      textareaRef: { current: null },
       atMenuOpen: true, atQuery: {}, atMatches: Array.from({ length }, () => ({})), atActiveIndex,
+      hashMenuOpen: false, hashQuery: null, hashMatches: [], hashActiveIndex: 0, applyHashCompletion() {}, setHashMenuOpen() {}, setHashActiveIndex() {},
       onSteer() {}, onFollowUp() {},
       sendQueued() {}, handleSend() {},
       applySlashCommand() {},
@@ -803,11 +812,13 @@ function chatInputCallback(name, context) {
 }
 
 test("while a run streams, a bare /mcp opens Settings or is queued as before", async () => {
-  const run = async (value, handled, { mode = "steer", images = [] } = {}) => {
-    const calls = { builtin: [], prompts: [], cleared: 0 };
+  const run = async (value, handled, { mode = "steer", images = [], references = [] } = {}) => {
+    const calls = { builtin: [], prompts: [], steered: [], steered: [], cleared: 0 };
     const sendQueued = chatInputCallback("sendQueued", {
       value,
       attachedImages: images,
+      attachedReferencesRef: { current: references },
+      withSessionReferences,
       onAudioUnlock() {},
       clearInput() { calls.cleared += 1; },
       onBuiltinCommand: async () => ({ handled }),
@@ -815,8 +826,8 @@ test("while a run streams, a bare /mcp opens Settings or is queued as before", a
       isBareMcpCommand,
       runBuiltinCommand: async (message) => { calls.builtin.push(message); return handled; },
       onPromptWithStreamingBehavior: (message, behavior, attached) => calls.prompts.push([message, behavior, attached?.length ?? 0]),
-      onSteer() { throw new Error("slash messages are prompts"); },
-      onFollowUp() { throw new Error("slash messages are prompts"); },
+      onSteer: (message) => calls.steered.push(message),
+      onFollowUp: (message) => calls.steered.push(message),
     });
     sendQueued(mode);
     await new Promise((resolve) => setImmediate(resolve));
@@ -824,15 +835,20 @@ test("while a run streams, a bare /mcp opens Settings or is queued as before", a
   };
 
   // Owned: Settings opened, nothing queued, the handler clears the input itself.
-  assert.deepEqual(await run("/mcp", true), { builtin: ["/mcp"], prompts: [], cleared: 0 });
+  assert.deepEqual(await run("/mcp", true), { builtin: ["/mcp"], prompts: [], steered: [], cleared: 0 });
   // Another extension's /mcp: queued exactly as before.
-  assert.deepEqual(await run("/mcp", false), { builtin: ["/mcp"], prompts: [["/mcp", "steer", 0]], cleared: 1 });
-  assert.deepEqual(await run("/mcp", false, { mode: "followup" }), { builtin: ["/mcp"], prompts: [["/mcp", "followUp", 0]], cleared: 1 });
+  assert.deepEqual(await run("/mcp", false), { builtin: ["/mcp"], prompts: [["/mcp", "steer", 0]], steered: [], cleared: 1 });
+  assert.deepEqual(await run("/mcp", false, { mode: "followup" }), { builtin: ["/mcp"], prompts: [["/mcp", "followUp", 0]], steered: [], cleared: 1 });
   // Subcommands and a /mcp with images never reach the handler.
-  assert.deepEqual(await run("/mcp login docs", true), { builtin: [], prompts: [["/mcp login docs", "steer", 0]], cleared: 1 });
-  assert.deepEqual(await run("/mcp", true, { images: [{}] }), { builtin: [], prompts: [["/mcp", "steer", 1]], cleared: 1 });
+  assert.deepEqual(await run("/mcp login docs", true), { builtin: [], prompts: [["/mcp login docs", "steer", 0]], steered: [], cleared: 1 });
+  assert.deepEqual(await run("/mcp", true, { images: [{}] }), { builtin: [], prompts: [["/mcp", "steer", 1]], steered: [], cleared: 1 });
   // The composer's own built-ins are unchanged.
-  assert.deepEqual(await run("/copy", true), { builtin: ["/copy"], prompts: [], cleared: 0 });
+  assert.deepEqual(await run("/copy", true), { builtin: ["/copy"], prompts: [], steered: [], cleared: 0 });
+  // A steer or follow-up carries the composer's session chips, even alone.
+  const reference = { id: "11111111-2222-3333-4444-555555555555", title: "old chat" };
+  const token = "[old chat](#session:11111111-2222-3333-4444-555555555555)";
+  assert.deepEqual(await run("see this", false, { references: [reference] }), { builtin: [], prompts: [], steered: [`see this\n\n${token}`], cleared: 1 });
+  assert.deepEqual(await run("", false, { mode: "followup", references: [reference] }), { builtin: [], prompts: [], steered: [token], cleared: 1 });
 });
 
 test("handleSend lets a handled /mcp through while streaming and sends an unowned one when idle", async () => {
@@ -841,6 +857,8 @@ test("handleSend lets a handled /mcp through while streaming and sends an unowne
     const handleSend = chatInputCallback("handleSend", {
       value,
       attachedImages: [],
+      attachedReferencesRef: { current: [] },
+      withSessionReferences: (text) => text,
       onAudioUnlock() {},
       isStreaming,
       offersBuiltinSlashCommandWhileStreaming,
@@ -1149,6 +1167,34 @@ test("a capped composer keeps its scroll while it regrows, so a caret at the end
   autoGrowTextarea(tall);
   assert.equal(tall.style.height, "200px");
   assert.equal(tall.scrollTop, 40, "the auto-height reset does not leave the box scrolled back to the top");
+});
+
+test("a re-wrapped draft keeps a caret at the end visible instead of replaying the old offset", () => {
+  // As when a run's Steer / Follow-up / Side-chat buttons narrow the composer:
+  // the text wraps taller with no keystroke, so no browser caret scroll comes.
+  const ta = {
+    value: "many\nlines",
+    selectionEnd: "many\nlines".length,
+    scrollTop: 158,
+    style: { height: "", overflowY: "" },
+    get scrollHeight() { return 1075; },
+    clientHeight: 200,
+  };
+  autoGrowTextarea(ta);
+  assert.equal(ta.scrollTop, 1075, "an end caret follows the text to its bottom");
+});
+
+test("a caret inside the text keeps the scroll it had while the box regrows", () => {
+  const ta = {
+    value: "many\nlines",
+    selectionEnd: 3,
+    scrollTop: 158,
+    style: { height: "", overflowY: "" },
+    get scrollHeight() { return 1075; },
+    clientHeight: 200,
+  };
+  autoGrowTextarea(ta);
+  assert.equal(ta.scrollTop, 158, "a mid-text caret cannot be positioned, so the old offset stays");
 });
 
 test("a programmatic caret at the end scrolls an overflowing box to its bottom, a mid-text caret does not", () => {

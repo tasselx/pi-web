@@ -2,6 +2,8 @@ import {
   MAX_ATTACHED_IMAGES,
   isBase64ImageWithinLimits,
 } from "./image-attachments";
+import { getBrowserStorage } from "./browser-storage";
+import type { SessionReferenceTarget } from "./session-reference-target";
 
 export interface ChatDraftImage {
   data: string;
@@ -11,6 +13,9 @@ export interface ChatDraftImage {
 export interface ChatDraft {
   value: string;
   images: ChatDraftImage[];
+  /** Quoted sessions, kept in memory only, like the images: a chip that comes
+   *  back after a reload would name a token the stored text never went through. */
+  references?: SessionReferenceTarget[];
 }
 
 const drafts = new Map<string, ChatDraft>();
@@ -56,15 +61,6 @@ const pendingStores = new Set<string>();
 const storeHolds = new Map<string, number>();
 let storeTimer: ReturnType<typeof setTimeout> | null = null;
 let flushListenersAdded = false;
-
-function getBrowserStorage(): DraftStorage | null {
-  if (typeof window === "undefined") return null;
-  try {
-    return window.localStorage ?? null;
-  } catch {
-    return null;
-  }
-}
 
 /** A fresh composer's keys hold a per-composer id; only a session id means the same draft after a reload. */
 function isStoredDraftKey(key: string): boolean {
@@ -215,14 +211,17 @@ export function clearStoredDrafts(): void {
 }
 
 function cloneDraft(draft: ChatDraft): ChatDraft {
-  return {
+  const copy: ChatDraft = {
     value: draft.value,
     images: draft.images.map((image) => ({ ...image })),
   };
+  // Only when there are references: a draft's shape stays what callers wrote.
+  if (draft.references?.length) copy.references = draft.references.map((reference) => ({ ...reference }));
+  return copy;
 }
 
 function isEmptyDraft(draft: ChatDraft): boolean {
-  return !draft.value && draft.images.length === 0;
+  return !draft.value && draft.images.length === 0 && !draft.references?.length;
 }
 
 export function getDraft(key: string): ChatDraft | null {

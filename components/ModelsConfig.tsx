@@ -33,7 +33,11 @@ import {
   trackAddedModels,
   collectModelRenames,
   deleteProviderEntry,
+  extendModelSelection,
+  modifierClickSelection,
   renameProviderEntry,
+  removeModelEntries,
+  toggleModelSelection,
   updateHeaderRow,
   type HeaderRow,
   type ModelCostDraft,
@@ -73,6 +77,7 @@ import { OAuthPastePanel } from "./OAuthPastePanel";
 import { ProviderIcon } from "./ProviderIcon";
 import { ProviderUsageSummary } from "./ProviderUsageSummary";
 import { readJsonOrThrow } from "@/lib/fetch-json";
+import { errorMessage } from "@/lib/errors";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -90,6 +95,8 @@ interface ApiKeyProvider {
   displayName: string;
   configured: boolean;
   source?: string;
+  /** auth.json holds a key for it that does not resolve (a failing `!command`). */
+  unresolved?: true;
   modelCount: number;
   /** Provider also supports OAuth, so it appears in both picker sections. */
   supportsOAuth?: boolean;
@@ -211,10 +218,6 @@ const PROVIDER_ENTRY_MESSAGES: Record<ProviderEntryProblem, string> = {
 };
 
 // ── Form field helpers ────────────────────────────────────────────────────────
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return <ConfigField label={label}>{children}</ConfigField>;
-}
 
 const inputStyle = {
   padding: "6px 9px",
@@ -388,7 +391,7 @@ function ProviderDetail({ name, editingName, fallbackLabel, provider, onChange, 
       setDiscoveryState({ phase: "success", models: data.models, endpoint: data.endpoint ?? provider.baseUrl ?? "" });
     } catch (error) {
       if (requestId !== discoveryRequestIdRef.current) return;
-      setDiscoveryState({ phase: "error", message: error instanceof Error ? error.message : String(error) });
+      setDiscoveryState({ phase: "error", message: errorMessage(error) });
     }
   }, [discoveryState.phase, name, provider]);
 
@@ -449,7 +452,7 @@ function ProviderDetail({ name, editingName, fallbackLabel, provider, onChange, 
         <EnabledModelsProviderSwitchNote providerId={name} controller={enabledModels} id={switchNoteId} />
       </div>
 
-       <Field label={t("i18n.providerId")}>
+       <ConfigField label={t("i18n.providerId")}>
         <TextInput value={editingName} onChange={onEditingNameChange} placeholder="provider-id" mono />
         {editingName !== name && editingName.trim() && (
           <button onClick={() => onRename(editingName.trim())}
@@ -457,34 +460,34 @@ function ProviderDetail({ name, editingName, fallbackLabel, provider, onChange, 
              {t("i18n.rename")}
           </button>
         )}
-      </Field>
+      </ConfigField>
 
       {/* models.json `name`: the label the sidebar and the selector show (#1567). */}
-      <Field label={t("models.providerDisplayName")}>
+      <ConfigField label={t("models.providerDisplayName")}>
         <TextInput value={provider.name ?? ""} onChange={(v) => onChange(setProviderDisplayName(provider, v))}
           placeholder={fallbackLabel} />
-      </Field>
+      </ConfigField>
 
-      <Field label="Base URL">
+      <ConfigField label="Base URL">
         <TextInput value={provider.baseUrl ?? ""} onChange={(v) => set("baseUrl", v || undefined)}
           placeholder="https://api.example.com/v1" inputMode="url" mono />
-      </Field>
+      </ConfigField>
 
-      <Field label="API Key">
+      <ConfigField label="API Key">
         <SecretTextInput value={provider.apiKey ?? ""} onChange={(v) => set("apiKey", v || undefined)}
           placeholder={t("models.apiKeyPlaceholder")} mono />
-      </Field>
+      </ConfigField>
 
-      <Field label="API">
+      <ConfigField label="API">
         <Select value={provider.api ?? ""} onChange={(v) => set("api", v || undefined)} options={API_OPTIONS} />
-      </Field>
+      </ConfigField>
 
-      <Field label="Headers">
+      <ConfigField label="Headers">
         <HeaderListEditor
           headers={provider.headers}
           onChange={(headers) => set("headers", headers)}
         />
-      </Field>
+      </ConfigField>
 
       <div style={{ borderTop: "1px solid var(--border)", paddingTop: 14, display: "flex", flexDirection: "column", gap: 10 }}>
         {discoveryState.phase !== "success" && (
@@ -971,7 +974,7 @@ function ModelDetail({
       });
     } catch (e) {
       if (requestId !== testRequestIdRef.current) return;
-      setTestState({ phase: "error", message: e instanceof Error ? e.message : String(e) });
+      setTestState({ phase: "error", message: errorMessage(e) });
     }
   }, [model, provider, providerName, testState.phase]);
 
@@ -1003,7 +1006,7 @@ function ModelDetail({
       });
     } catch (error) {
       if (requestId !== catalogRequestIdRef.current) return;
-      setCatalogState({ phase: "error", message: error instanceof Error ? error.message : String(error) });
+      setCatalogState({ phase: "error", message: errorMessage(error) });
     }
   }, [catalogState.phase, model, onChange, effectiveBaseUrl, providerName]);
 
@@ -1139,8 +1142,8 @@ function ModelDetail({
       </ConfigDetailHeader>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-        <Field label="ID *"><TextInput value={model.id} onChange={(v) => set("id", v)} placeholder="model-id" mono /></Field>
-        <Field label="Name"><TextInput value={model.name ?? ""} onChange={(v) => set("name", v || undefined)} placeholder={t("models.displayNamePlaceholder")} /></Field>
+        <ConfigField label="ID *"><TextInput value={model.id} onChange={(v) => set("id", v)} placeholder="model-id" mono /></ConfigField>
+        <ConfigField label="Name"><TextInput value={model.name ?? ""} onChange={(v) => set("name", v || undefined)} placeholder={t("models.displayNamePlaceholder")} /></ConfigField>
       </div>
 
       <div style={{ padding: "2px 0" }}>
@@ -1217,14 +1220,14 @@ function ModelDetail({
         </div>
 
         <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 10 }}>
-          <Field label={t("models.contextWindow")}>
+          <ConfigField label={t("models.contextWindow")}>
             <NumInput value={model.contextWindow !== undefined ? String(model.contextWindow) : ""}
               onChange={(v) => set("contextWindow", v ? parseInt(v) : undefined)} placeholder="128000" />
-          </Field>
-          <Field label={t("models.maxOutputTokens")}>
+          </ConfigField>
+          <ConfigField label={t("models.maxOutputTokens")}>
             <NumInput value={model.maxTokens !== undefined ? String(model.maxTokens) : ""}
               onChange={(v) => set("maxTokens", v ? parseInt(v) : undefined)} placeholder="16384" />
-          </Field>
+          </ConfigField>
         </div>
 
         <div style={{ marginTop: 16 }}>
@@ -1234,9 +1237,9 @@ function ModelDetail({
           {costEditing ? (
             <div style={{ marginTop: 8, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(110px, 1fr))", gap: 8 }}>
               {costFields.map(({ key, label }) => (
-                <Field key={key} label={label}>
+                <ConfigField key={key} label={label}>
                   <NumInput value={costDraft[key]} onChange={(v) => setCost(key, v)} placeholder="0" />
-                </Field>
+                </ConfigField>
               ))}
               {hasModelCostDraftValue(costDraft) && !parseCompleteModelCost(costDraft) && (
                 <div aria-live="polite" style={{ gridColumn: "1 / -1", color: "#d97706", fontSize: 10 }}>
@@ -1298,16 +1301,16 @@ function ModelDetail({
 
         {advancedOpen && (
           <div id="model-advanced-settings" style={{ display: "flex", flexDirection: "column", gap: 14, padding: "4px 0 16px" }}>
-            <Field label={t("models.baseUrlOverride")}>
+            <ConfigField label={t("models.baseUrlOverride")}>
               <TextInput value={model.baseUrl ?? ""} onChange={(v) => set("baseUrl", v.trim() || undefined)}
                 placeholder={provider.baseUrl ?? t("models.providerDefaults")} inputMode="url" mono />
-            </Field>
+            </ConfigField>
 
-            <Field label={t("models.apiOverride")}>
+            <ConfigField label={t("models.apiOverride")}>
               <Select value={model.api ?? ""} onChange={(v) => set("api", v || undefined)} options={API_OPTIONS} />
-            </Field>
+            </ConfigField>
 
-            <Field label={t("models.headers")}>
+            <ConfigField label={t("models.headers")}>
               <HeaderListEditor
                 headers={model.headers}
                 onChange={(headers) => set("headers", headers)}
@@ -1315,10 +1318,10 @@ function ModelDetail({
               <span style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 2 }}>
                 {t("models.headersHelp")}
               </span>
-            </Field>
+            </ConfigField>
 
             {(model.input?.includes("image") || imageLimit !== undefined) && (
-              <Field label={t("models.imageMaxBytes")}>
+              <ConfigField label={t("models.imageMaxBytes")}>
                 <NumInput
                   value={imageLimit === undefined ? "" : String(imageLimit)}
                   onChange={(v) => onChange(withImageMaxBytes(model, v.trim() || undefined))}
@@ -1332,7 +1335,7 @@ function ModelDetail({
                 <code style={{ fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>
                   inputLimits.images.resize.maxBytes
                 </code>
-              </Field>
+              </ConfigField>
             )}
 
             {model.reasoning && (
@@ -1663,6 +1666,8 @@ function ApiKeyDetail({ provider, onRefresh, enabledModels, contextSettings }: {
   const [savedOk, setSavedOk] = useState(false);
   const { t } = useI18n();
   const canSave = Boolean(llama ? serverUrl.trim() : apiKey.trim());
+  const hasStoredKey = provider.configured || Boolean(provider.unresolved);
+  const statusColor = provider.configured ? "#4ade80" : provider.unresolved ? "#f87171" : undefined;
 
   async function handleSave() {
     if (!canSave || saving) return;
@@ -1719,12 +1724,12 @@ function ApiKeyDetail({ provider, onRefresh, enabledModels, contextSettings }: {
         </ConfigDetailHeaderInfo>
         <ConfigDetailActions>
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <span style={{ width: 7, height: 7, borderRadius: "50%", background: provider.configured ? "#4ade80" : "var(--border)", display: "inline-block" }} />
-            <span style={{ fontSize: 11, color: provider.configured ? "#4ade80" : "var(--text-dim)" }}>
-               {provider.configured ? t("i18n.configured") : t("i18n.notConfigured")}
+            <span style={{ width: 7, height: 7, borderRadius: "50%", background: statusColor ?? "var(--border)", display: "inline-block" }} />
+            <span style={{ fontSize: 11, color: statusColor ?? "var(--text-dim)" }}>
+               {provider.configured ? t("i18n.configured") : provider.unresolved ? t("models.storedKeyUnresolved") : t("i18n.notConfigured")}
             </span>
           </div>
-          {provider.configured && (
+          {hasStoredKey && (
             <ConfigButton
               variant="danger"
               size="small"
@@ -1744,7 +1749,7 @@ function ApiKeyDetail({ provider, onRefresh, enabledModels, contextSettings }: {
             onChange={(event) => setServerUrl(event.target.value)} spellCheck={false} />
         </label>
       )}
-      {!llama && !provider.configured && (
+      {!llama && !hasStoredKey && (
         <p style={{ margin: 0, fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>
           {provider.modelCount === 1
             ? t("models.apiKeyEnableOne", { provider: provider.displayName })
@@ -1761,7 +1766,7 @@ function ApiKeyDetail({ provider, onRefresh, enabledModels, contextSettings }: {
             if (e.key === "Enter") handleSave();
           }}
           enterKeyHint="done"
-          placeholder={llama ? t("models.optionalApiKey") : provider.configured ? t("models.replaceApiKey") : "sk-…"}
+          placeholder={llama ? t("models.optionalApiKey") : hasStoredKey ? t("models.replaceApiKey") : "sk-…"}
           style={{ flex: 1 }}
           autoComplete="off"
           spellCheck={false}
@@ -1829,7 +1834,7 @@ function AddProviderPicker({
   const q = search.trim().toLowerCase();
 
   const availableOAuth = oauthProviders.filter((p) => !p.loggedIn && providerMatchesSearch(q, p.id, p.name));
-  const availableApiKey = apiKeyProviders.filter((p) => !p.configured && providerMatchesSearch(q, p.id, p.displayName));
+  const availableApiKey = apiKeyProviders.filter((p) => !p.configured && !p.unresolved && providerMatchesSearch(q, p.id, p.displayName));
   const showCustom = !q || "custom".includes(q) || "openai-compatible".includes(q) || "anthropic-compatible".includes(q);
 
   const totalCount = availableOAuth.length + availableApiKey.length + (showCustom ? 1 : 0);
@@ -1994,6 +1999,15 @@ export function ModelsConfig({ onClose, embedded = false, cwd = null }: {
   const draggedModelRef = useRef<{ providerName: string; index: number } | null>(null);
   const [modelDrop, setModelDrop] = useState<{ providerName: string; index: number; after: boolean } | null>(null);
   /**
+   * Models picked for bulk deletion, scoped to one provider's footer. Entering
+   * closes a model detail; switching to another row leaves the mode.
+   */
+  const [modelSelection, setModelSelection] = useState<{ providerName: string; indices: Set<number> } | null>(null);
+  const selectionAnchorRef = useRef<number | null>(null);
+  /** Receives the focus a removed Select button cannot keep, so Escape still reaches the panel. */
+  const selectAllModelsRef = useRef<HTMLButtonElement | null>(null);
+  const selectingProviderRef = useRef<string | null>(null);
+  /**
    * The provider name field while it differs from the provider's id. Save
    * applies it like every other visible edit; Rename applies it right away.
    */
@@ -2027,7 +2041,7 @@ export function ModelsConfig({ onClose, embedded = false, cwd = null }: {
             ? { type: "provider", name: keys[0] }
             : null);
       })
-      .catch((e: unknown) => setLoadError(e instanceof Error ? e.message : String(e)))
+      .catch((e: unknown) => setLoadError(errorMessage(e)))
       .finally(() => setLoading(false));
     refreshAuthProviders();
   }, [refreshAuthProviders]);
@@ -2035,6 +2049,29 @@ export function ModelsConfig({ onClose, embedded = false, cwd = null }: {
   useEffect(() => {
     if (selection) setLastSettingsSelection("models", JSON.stringify(selection));
   }, [selection]);
+
+  // A provider switch, or any other row opening its detail, leaves selection mode.
+  useEffect(() => {
+    if (!modelSelection) return;
+    if (selection?.type === "provider" && selection.name === modelSelection.providerName) return;
+    setModelSelection(null);
+    selectionAnchorRef.current = null;
+    draggedModelRef.current = null;
+    setModelDrop(null);
+  }, [modelSelection, selection]);
+
+  // Entering replaces the Select button that had focus with the selection footer.
+  useEffect(() => {
+    const providerName = modelSelection?.providerName ?? null;
+    if (providerName && providerName !== selectingProviderRef.current) {
+      // A row click keeps focus on that row; only a removed Select button needs a new target.
+      const active = document.activeElement;
+      if (!active || active === document.body || !active.isConnected) {
+        selectAllModelsRef.current?.focus({ preventScroll: true });
+      }
+    }
+    selectingProviderRef.current = providerName;
+  }, [modelSelection]);
 
   // An overrides-only entry belongs to its managed provider, not a duplicate custom provider.
   useEffect(() => {
@@ -2183,6 +2220,8 @@ export function ModelsConfig({ onClose, embedded = false, cwd = null }: {
    * browser's own edge scrolling.
    */
   const modelDragProps = (providerName: string, index: number, modelId: string): ButtonHTMLAttributes<HTMLButtonElement> => {
+    // Rows toggle instead of moving while the provider's models are being picked.
+    if (modelSelection) return {};
     const target = (event: DragEvent<HTMLButtonElement>) => {
       const dragged = draggedModelRef.current;
       if (dragged?.providerName !== providerName) return null;
@@ -2241,6 +2280,57 @@ export function ModelsConfig({ onClose, embedded = false, cwd = null }: {
     setSelection({ type: "provider", name: providerName });
     closeDetail();
   }, [closeDetail]);
+
+  const startModelSelection = useCallback((providerName: string, indices: Iterable<number> = [], anchor: number | null = null) => {
+    // Entering closes the model detail and leaves no drag state behind.
+    setSelection({ type: "provider", name: providerName });
+    setModelSelection({ providerName, indices: new Set(indices) });
+    selectionAnchorRef.current = anchor;
+    draggedModelRef.current = null;
+    setModelDrop(null);
+  }, []);
+
+  const exitModelSelection = useCallback(() => {
+    setModelSelection(null);
+    selectionAnchorRef.current = null;
+    draggedModelRef.current = null;
+    setModelDrop(null);
+  }, []);
+
+  const toggleSelectedModel = (providerName: string, index: number, shiftKey: boolean) => {
+    if (!modelSelection || modelSelection.providerName !== providerName) return;
+    const anchor = selectionAnchorRef.current;
+    if (shiftKey && anchor !== null) {
+      setModelSelection({ providerName, indices: extendModelSelection(modelSelection.indices, anchor, index) });
+      return;
+    }
+    selectionAnchorRef.current = index;
+    setModelSelection({ providerName, indices: toggleModelSelection(modelSelection.indices, index) });
+  };
+
+  const selectAllModels = (providerName: string) => {
+    const count = config.providers?.[providerName]?.models?.length ?? 0;
+    setModelSelection({ providerName, indices: new Set(Array.from({ length: count }, (_, index) => index)) });
+    selectionAnchorRef.current = null;
+  };
+
+  const clearModelSelection = () => {
+    setModelSelection((current) => current ? { ...current, indices: new Set() } : current);
+    selectionAnchorRef.current = null;
+  };
+
+  const deleteSelectedModels = useCallback((providerName: string) => {
+    if (saving || loadError || !modelSelection || modelSelection.providerName !== providerName) return;
+    const next = removeModelEntries(config, savedModelIdsRef.current, providerName, [...modelSelection.indices]);
+    if (!next) return;
+    setConfig(next);
+    setModelSelection({ providerName, indices: new Set() });
+    selectionAnchorRef.current = null;
+    setSavedOk(false);
+    setSaveError(null);
+    // The Delete button may have just disabled itself; keep focus inside the panel for Escape.
+    selectAllModelsRef.current?.focus({ preventScroll: true });
+  }, [config, loadError, modelSelection, saving]);
 
   const handleSave = useCallback(async () => {
     if (loadError) return;
@@ -2319,7 +2409,8 @@ export function ModelsConfig({ onClose, embedded = false, cwd = null }: {
     return label ? <span className="models-sidebar-badge">{label}</span> : null;
   };
   const activeOAuth = oauthProviders.filter((p) => p.loggedIn);
-  const activeApiKey = apiKeyProviders.filter((p) => p.configured);
+  // An unresolved stored key still owns its provider, so it is listed with the configured ones.
+  const activeApiKey = apiKeyProviders.filter((p) => p.configured || p.unresolved);
 
   // Resolve current detail
   const detailContent = (() => {
@@ -2372,6 +2463,16 @@ export function ModelsConfig({ onClose, embedded = false, cwd = null }: {
   return (
     <>
     <ConfigPanelShell embedded={embedded} title={t("common.models")} subtitle="~/.pi/agent/models.json" closeLabel={t("i18n.close")} onClose={onClose}>
+      <div
+        style={{ display: "contents" }}
+        onKeyDown={(event) => {
+          // Escape leaves selection mode before Settings' own Escape closes the panel.
+          if (!modelSelection || event.key !== "Escape" || event.defaultPrevented) return;
+          if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
+          event.preventDefault();
+          exitModelSelection();
+        }}
+      >
 
         <EnabledModelsBanner controller={enabledModels} />
 
@@ -2408,6 +2509,10 @@ export function ModelsConfig({ onClose, embedded = false, cwd = null }: {
                   >
                     <ProviderIcon id={p.id} size={16} />
                     <ConfigSidebarText className="is-grow">{p.displayName}</ConfigSidebarText>
+                    {p.unresolved && (
+                      <span role="img" aria-label={t("models.storedKeyUnresolved")} title={t("models.storedKeyUnresolved")}
+                        style={{ width: 7, height: 7, borderRadius: "50%", background: "#f87171", flexShrink: 0 }} />
+                    )}
                     {scopeBadge(p.id)}
                   </ConfigSidebarItem>
                 );
@@ -2424,6 +2529,8 @@ export function ModelsConfig({ onClose, embedded = false, cwd = null }: {
               ) : providers.map(([pName, pData]) => {
                 const isProviderSelected = selection?.type === "provider" && selection.name === pName;
                 const models = pData.models ?? [];
+                const selecting = modelSelection?.providerName === pName;
+                const selectedCount = selecting ? modelSelection.indices.size : 0;
                 return (
                   <div key={pName} style={{ marginBottom: 2 }}>
                     {/* Provider row */}
@@ -2447,6 +2554,7 @@ export function ModelsConfig({ onClose, embedded = false, cwd = null }: {
                     {/* Model rows */}
                     {models.map((m, i) => {
                       const isModelSelected = selection?.type === "model" && selection.providerName === pName && selection.index === i;
+                      const isChecked = selecting && modelSelection.indices.has(i);
                       let modelKey = modelKeysRef.current.get(m);
                       if (!modelKey) {
                         modelKey = `model-${++modelKeySequenceRef.current}`;
@@ -2456,13 +2564,31 @@ export function ModelsConfig({ onClose, embedded = false, cwd = null }: {
                       return (
                         <ConfigSidebarItem
                           key={modelKey}
-                          active={isModelSelected}
-                          className="models-sidebar-indented-item"
+                          active={!selecting && isModelSelected}
+                          aria-pressed={selecting ? isChecked : undefined}
+                          className={`models-sidebar-indented-item${isChecked ? " is-model-selected" : ""}`}
                           style={drop ? { boxShadow: `inset 0 ${drop.after ? "-2px" : "2px"} 0 var(--accent)` } : undefined}
-                          aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown"
-                          onClick={() => setSelection({ type: "model", providerName: pName, index: i })}
+                          aria-keyshortcuts={selecting ? undefined : "Alt+ArrowUp Alt+ArrowDown"}
+                          onClick={(event) => {
+                            if (selecting) {
+                              // Toggle the row instead of opening the model detail.
+                              event.preventDefault();
+                              toggleSelectedModel(pName, i, event.shiftKey);
+                              return;
+                            }
+                            const openModel = selection?.type === "model" && selection.providerName === pName
+                              ? selection.index
+                              : null;
+                            if (openModel !== null && (event.shiftKey || event.ctrlKey || event.metaKey)) {
+                              // A modified click on a second row starts selection mode from the open model.
+                              event.preventDefault();
+                              startModelSelection(pName, modifierClickSelection(openModel, i, event.shiftKey), i);
+                              return;
+                            }
+                            setSelection({ type: "model", providerName: pName, index: i });
+                          }}
                           onKeyDown={(event) => {
-                            if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+                            if (modelSelection || !event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
                             const direction = event.key === "ArrowUp" ? -1 : event.key === "ArrowDown" ? 1 : null;
                             if (direction === null) return;
                             event.preventDefault();
@@ -2473,6 +2599,11 @@ export function ModelsConfig({ onClose, embedded = false, cwd = null }: {
                           <ConfigSidebarText className="is-grow" style={{ color: m.id ? "var(--text-muted)" : "var(--text-dim)" }}>
                             {modelSidebarLabel(m) || t("i18n.newModel")}
                           </ConfigSidebarText>
+                          {isChecked && (
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ color: "var(--accent)", flexShrink: 0 }}>
+                              <polyline points="20 6 9 17 4 12" />
+                            </svg>
+                          )}
                           {m.reasoning && (
                             <span style={{ fontSize: 9, padding: "1px 4px", background: "rgba(99,102,241,0.12)", color: "rgba(99,102,241,0.8)", borderRadius: 3, flexShrink: 0 }}>T</span>
                           )}
@@ -2480,25 +2611,68 @@ export function ModelsConfig({ onClose, embedded = false, cwd = null }: {
                       );
                     })}
 
-                    {/* Add model button, and A–Z */}
-                    <div className="models-sidebar-model-footer">
-                      <ConfigSidebarItem
-                        className="models-sidebar-indented-item models-sidebar-add-item"
-                        onClick={(e) => { e.stopPropagation(); addModel(pName); }}
-                      >
-                        <ConfigSidebarText>+ {t("i18n.model")}</ConfigSidebarText>
-                      </ConfigSidebarItem>
-                      <button
-                        type="button"
-                        className="models-sidebar-sort-button"
-                        aria-label={t("models.sortByName")}
-                        title={t("models.sortByName")}
-                        disabled={saving || loadError !== null || models.length < 2}
-                        onClick={() => sortModels(pName)}
-                      >
-                        A–Z
-                      </button>
-                    </div>
+                    {/* Keyed apart, so the Select button unmounts instead of becoming Delete and keeping the focus. */}
+                    {selecting ? (
+                      <div key="selecting" className="models-sidebar-model-footer models-sidebar-selection-footer">
+                        <button
+                          type="button"
+                          ref={selectAllModelsRef}
+                          className="models-sidebar-selection-action is-grow"
+                          onClick={() => selectAllModels(pName)}
+                        >
+                          {t("models.selectAll")}
+                        </button>
+                        <button
+                          type="button"
+                          className="models-sidebar-selection-action"
+                          onClick={clearModelSelection}
+                        >
+                          {t("models.clearSelection")}
+                        </button>
+                        <button
+                          type="button"
+                          className="models-sidebar-selection-action is-danger"
+                          disabled={saving || loadError !== null || selectedCount === 0}
+                          onClick={() => deleteSelectedModels(pName)}
+                        >
+                          {t("models.deleteSelected", { count: selectedCount })}
+                        </button>
+                        <button
+                          type="button"
+                          className="models-sidebar-selection-action"
+                          onClick={exitModelSelection}
+                        >
+                          {t("models.done")}
+                        </button>
+                      </div>
+                    ) : (
+                      <div key="footer" className="models-sidebar-model-footer">
+                        <ConfigSidebarItem
+                          className="models-sidebar-indented-item models-sidebar-add-item"
+                          onClick={(e) => { e.stopPropagation(); addModel(pName); }}
+                        >
+                          <ConfigSidebarText>+ {t("i18n.model")}</ConfigSidebarText>
+                        </ConfigSidebarItem>
+                        <button
+                          type="button"
+                          className="models-sidebar-sort-button"
+                          aria-label={t("models.sortByName")}
+                          title={t("models.sortByName")}
+                          disabled={saving || loadError !== null || models.length < 2}
+                          onClick={() => sortModels(pName)}
+                        >
+                          A–Z
+                        </button>
+                        <button
+                          type="button"
+                          className="models-sidebar-select-button"
+                          disabled={saving || loadError !== null || models.length === 0}
+                          onClick={() => startModelSelection(pName)}
+                        >
+                          {t("models.select")}
+                        </button>
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -2541,6 +2715,7 @@ export function ModelsConfig({ onClose, embedded = false, cwd = null }: {
              <span>{savedOk ? t("i18n.saved") : saving ? t("i18n.saving") : t("i18n.save")}</span>
           </ConfigButton>
         </ConfigFooter>
+      </div>
     </ConfigPanelShell>
     {pickerOpen && (
       <AddProviderPicker
